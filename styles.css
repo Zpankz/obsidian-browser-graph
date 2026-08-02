@@ -1,1 +1,4 @@
-/* Browser Sync styles are added with the UI in later tasks. */
+.browser-sync-status-row .setting-item-description {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
