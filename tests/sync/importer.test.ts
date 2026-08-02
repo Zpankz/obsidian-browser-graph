@@ -43,7 +43,8 @@ function browserProfile(
 
 function persisted(overrides: Partial<PersistedData> = {}): PersistedData {
   const defaults: PersistedData = {
-    version: 1,
+    version: 2,
+    machineNamespace: 'a'.repeat(32),
     settings: {
       ...DEFAULT_SETTINGS,
       enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },

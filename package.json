@@ -7,9 +7,10 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
     "test": "vitest run",
+    "test:release": "vitest run --config vitest.release.config.ts",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "check": "npm run lint && npm test && npm run build"
+    "check": "npm run lint && npm test && npm run build && npm run test:release"
   },
   "dependencies": {
     "obsidian": "^1.13.1",

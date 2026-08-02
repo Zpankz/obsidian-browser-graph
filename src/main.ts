@@ -1,6 +1,6 @@
 import { access, readFile, readdir } from 'node:fs/promises';
 import { constants as fileSystemConstants } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import {
   FileSystemAdapter,
@@ -28,7 +28,12 @@ import {
   type DetectedProfileStatus,
   type PluginSettingField,
 } from './settings-tab';
-import { DEFAULT_SETTINGS, isSafeVaultFolder, migratePersistedData } from './settings';
+import {
+  DEFAULT_SETTINGS,
+  deriveMachineNamespace,
+  isSafeVaultFolder,
+  migratePersistedData,
+} from './settings';
 import { createSqliteFactory, type SqliteFactory } from './sql/sqlite';
 import { withDatabaseSnapshot } from './sql/snapshot';
 import {
@@ -40,6 +45,7 @@ import {
 
 export interface BrowserSyncRuntime {
   platform: DiscoveryPlatform;
+  machineNamespace: string;
   vault: VaultPort;
   discover: ImportDependencies['discover'];
   readVisits: ImportDependencies['readVisits'];
@@ -52,7 +58,8 @@ export interface BrowserSyncRuntime {
 }
 
 const initialData = (): PersistedData => ({
-  version: 1,
+  version: 2,
+  machineNamespace: '',
   settings: {
     ...DEFAULT_SETTINGS,
     enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
@@ -72,10 +79,14 @@ export default class BrowserSyncPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    const loaded = migratePersistedData(await this.loadData());
+    const runtime = this.createRuntime();
+    const loaded = migratePersistedData(
+      await this.loadData(),
+      runtime.machineNamespace,
+    );
     this.data = clonePersistedData(loaded);
     this.committedData = clonePersistedData(loaded);
-    this.runtime = this.createRuntime();
+    this.runtime = runtime;
     this.addSettingTab(new BrowserSyncSettingTab(this.app, this));
     this.addCommand({
       id: 'import-browser-history',
@@ -98,10 +109,11 @@ export default class BrowserSyncPlugin extends Plugin {
     return this.enqueuePersistence(async () => {
       const composed = applySettingsPatch(this.committedData.settings, patch);
       const normalized = migratePersistedData({
-        version: 1,
+        version: 2,
+        machineNamespace: this.committedData.machineNamespace,
         settings: composed,
         cursors: this.committedData.cursors,
-      }).settings;
+      }, this.committedData.machineNamespace).settings;
       if (!validSettings(normalized)) {
         throw new Error('Browser Sync settings changed to an unsupported value.');
       }
@@ -181,15 +193,21 @@ export default class BrowserSyncPlugin extends Plugin {
 
   protected createRuntime(): BrowserSyncRuntime {
     const platform = currentPlatform();
+    const homeDir = homedir();
     const permissionDeniedPaths = new Set<string>();
     const fs = nodeFileSystem(permissionDeniedPaths);
     const sqlite = createSqliteFactory(installedPluginDirectory(this));
     return {
       platform,
+      machineNamespace: deriveMachineNamespace({
+        platform,
+        hostname: hostname(),
+        homeDir,
+      }),
       vault: new ObsidianVaultPort(this.app.vault),
       discover: () => discoverProfiles({
         platform,
-        homeDir: homedir(),
+        homeDir,
         environment: process.env,
         fs,
       }),
@@ -238,7 +256,8 @@ export default class BrowserSyncPlugin extends Plugin {
   private persistCursorData(data: PersistedData): Promise<void> {
     return this.enqueuePersistence(async () => {
       const snapshot = clonePersistedData({
-        version: 1,
+        version: 2,
+        machineNamespace: this.committedData.machineNamespace,
         settings: this.committedData.settings,
         cursors: data.cursors,
       });
@@ -271,6 +290,8 @@ export function readerFor(kind: BrowserProfile['readerKind']): BrowserHistoryRea
       return new SafariReader();
   }
 }
+
+export { createSqliteFactory };
 
 async function readProfileVisits(
   profile: BrowserProfile,
@@ -345,7 +366,8 @@ function cloneSettings(settings: PluginSettings): PluginSettings {
 
 function clonePersistedData(data: PersistedData): PersistedData {
   return {
-    version: 1,
+    version: 2,
+    machineNamespace: data.machineNamespace,
     settings: cloneSettings(data.settings),
     cursors: Object.fromEntries(
       Object.entries(data.cursors).map(([sourceKey, cursor]) => [

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   BrowserId,
   NotePeriod,
@@ -19,6 +20,24 @@ const browserIds: readonly BrowserId[] = [
 
 const notePeriods: readonly NotePeriod[] = ['day', 'week', 'month', 'year'];
 const outputLayouts: readonly OutputLayout[] = ['flat', 'tiered'];
+const MACHINE_NAMESPACE = /^[a-f0-9]{32}$/;
+
+export interface LocalMachineIdentity {
+  platform: string;
+  hostname: string;
+  homeDir: string;
+}
+
+export function deriveMachineNamespace(identity: LocalMachineIdentity): string {
+  return createHash('sha256')
+    .update([
+      identity.platform,
+      identity.hostname,
+      identity.homeDir,
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 32);
+}
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   enabledBrowsers: {
@@ -134,12 +153,21 @@ function migrateCursors(value: unknown): Record<string, ProfileCursor> {
   return cursors;
 }
 
-export function migratePersistedData(raw: unknown): PersistedData {
+export function migratePersistedData(
+  raw: unknown,
+  currentMachineNamespace: string,
+): PersistedData {
+  if (!MACHINE_NAMESPACE.test(currentMachineNamespace)) {
+    throw new Error('Browser Sync requires a hashed local machine namespace.');
+  }
   const data = isRecord(raw) ? raw : {};
+  const cursorsBelongToThisMachine = data.version === 2
+    && data.machineNamespace === currentMachineNamespace;
 
   return {
-    version: 1,
+    version: 2,
+    machineNamespace: currentMachineNamespace,
     settings: migrateSettings(data.settings),
-    cursors: migrateCursors(data.cursors),
+    cursors: cursorsBelongToThisMachine ? migrateCursors(data.cursors) : {},
   };
 }

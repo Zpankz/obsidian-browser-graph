@@ -23,7 +23,8 @@ export interface ProfileCursor {
 }
 
 export interface PersistedData {
-  version: 1;
+  version: 2;
+  machineNamespace: string;
   settings: PluginSettings;
   cursors: Record<string, ProfileCursor>;
 }

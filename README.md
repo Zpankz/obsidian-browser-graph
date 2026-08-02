@@ -38,9 +38,10 @@ Install a current Node.js release supported by the repository's dependencies, th
 npm ci
 npm test
 npm run build
+npm run test:release
 ```
 
-Copy the same four generated release files listed above into `<vault>/.obsidian/plugins/obsidian-browser-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin.
+`npm test` is artifact-independent and succeeds before a build. `npm run test:release` runs only after the build and stages the exact four-file release in an isolated temporary directory for verification. Copy the same four generated release files listed above into `<vault>/.obsidian/plugins/obsidian-browser-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin.
 
 ## Use
 
@@ -97,7 +98,9 @@ Dates, times, and filenames use the local timezone of the Obsidian desktop envir
 
 Each imported entry is followed by a hidden `obsidian-browser-sync` marker containing a deterministic visit ID. These markers are the final deduplication authority, so running the command twice without new history adds nothing. New visits extend only their applicable notes.
 
-The plugin also saves a high-water cursor for each stable browser profile in its `data.json`. Cursor state is machine-specific and should not be treated as portable vault content. If that state is deleted, omitted from Git, or copied from another machine, the next import may rescan from the beginning, but existing hidden markers prevent duplicate entries. Keep the markers in generated notes if you edit them.
+The plugin also saves a high-water cursor for each stable browser profile in its `data.json`. Cursor state is machine-specific and should not be treated as portable vault content. The saved state contains a privacy-preserving hash namespace derived from local machine identity; it never stores the raw hostname or home-directory value used to derive that hash.
+
+If state is deleted or omitted from Git, the next import rescans from the beginning. If `data.json` is copied to another machine—even one where a browser profile has the same path—the namespace mismatch invalidates the copied cursors and safely triggers the same full rescan. Existing hidden markers remain machine-independent and prevent duplicate entries. Keep the markers in generated notes if you edit them.
 
 ## Safari permission and retry guidance
 
@@ -126,7 +129,7 @@ The release includes `sql-wasm.wasm`, an approximately 660 kB uncompressed binar
 npm run lint
 npm test
 npm run build
-npm test -- tests/release.test.ts
+npm run test:release
 ```
 
-Tests use synthetic database fixtures and in-memory vaults. They never inspect real browser history.
+Run the commands in that order: the default suite is intentionally independent of ignored build artifacts, while release verification requires a fresh build. Tests use synthetic database fixtures and in-memory vaults. They never inspect real browser history.

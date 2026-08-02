@@ -184,7 +184,7 @@ import BrowserSyncPlugin, {
 import { BrowserSyncSettingTab } from '../src/settings-tab';
 import { DEFAULT_SETTINGS } from '../src/settings';
 import { runImport } from '../src/sync/importer';
-import { fakeVault } from './helpers/fake-vault';
+import { fakeVault, fakeVaultWithRenderedVisit } from './helpers/fake-vault';
 import { visit } from './helpers/visits';
 
 const emptySummary: ImportSummary = {
@@ -193,10 +193,13 @@ const emptySummary: ImportSummary = {
   skippedProfiles: 0,
   failedProfiles: [],
 };
+const MACHINE_A = 'a'.repeat(32);
+const MACHINE_B = 'b'.repeat(32);
 
 function clonedDefaults(): PersistedData {
   return {
-    version: 1,
+    version: 2,
+    machineNamespace: MACHINE_A,
     settings: {
       ...DEFAULT_SETTINGS,
       enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
@@ -210,6 +213,7 @@ function runtime(
 ): BrowserSyncRuntime {
   return {
     platform: 'linux',
+    machineNamespace: MACHINE_A,
     vault: fakeVault(),
     discover: vi.fn(async () => []),
     readVisits: vi.fn(async () => []),
@@ -338,6 +342,70 @@ describe('BrowserSyncPlugin', () => {
     ))
       .rejects.toThrow('vault-relative');
     expect(plugin.saved).toHaveLength(1);
+  });
+
+  it('rescans a same-path profile when state was copied from another machine', async () => {
+    const samePathProfile: BrowserProfile = {
+      sourceKey: 'chrome:same-path',
+      browserId: 'chrome',
+      browserName: 'Google Chrome',
+      profileId: 'Default',
+      profileName: 'Personal',
+      databasePath: '/same/home/.config/google-chrome/Default/History',
+      readerKind: 'chromium',
+    };
+    const existing = visit({
+      sourceKey: samePathProfile.sourceKey,
+      browserId: samePathProfile.browserId,
+      browserName: samePathProfile.browserName,
+      profileId: samePathProfile.profileId,
+      profileName: samePathProfile.profileName,
+      sourceVisitId: '1',
+    });
+    const newer = visit({
+      sourceKey: samePathProfile.sourceKey,
+      browserId: samePathProfile.browserId,
+      browserName: samePathProfile.browserName,
+      profileId: samePathProfile.profileId,
+      profileName: samePathProfile.profileName,
+      sourceVisitId: '2',
+      visitedAt: new Date('2026-08-03T13:00:00Z'),
+    });
+    const vault = fakeVaultWithRenderedVisit(existing);
+    const readVisits = vi.fn(async () => [existing, newer]);
+    const plugin = new PluginHarness({
+      version: 2,
+      machineNamespace: MACHINE_A,
+      settings: clonedDefaults().settings,
+      cursors: {
+        [samePathProfile.sourceKey]: {
+          visitedAtMs: Date.parse('2026-08-04T00:00:00Z'),
+          sourceVisitId: '99',
+        },
+      },
+    }, runtime({
+      machineNamespace: MACHINE_B,
+      vault,
+      discover: vi.fn(async () => [samePathProfile]),
+      readVisits,
+      runImporter: runImport,
+    }));
+
+    await plugin.onload();
+    expect(plugin.data.cursors).toEqual({});
+
+    await plugin.importBrowserHistory();
+
+    expect(readVisits).toHaveBeenCalledWith(samePathProfile, undefined);
+    expect(vault.readText('Browser History/2026/2026-08.md')
+      .match(/obsidian-browser-sync/g)).toHaveLength(2);
+    expect(plugin.saved.at(-1)).toMatchObject({
+      version: 2,
+      machineNamespace: MACHINE_B,
+      cursors: {
+        [samePathProfile.sourceKey]: { sourceVisitId: '2' },
+      },
+    });
   });
 
   it('serializes overlapping saves and keeps a later success after an earlier failure', async () => {
