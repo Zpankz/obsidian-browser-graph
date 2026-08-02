@@ -27,12 +27,18 @@ export function createSqliteFactory(
   dependencies: SqliteRuntimeDependencies = runtimeDependencies,
 ): SqliteFactory {
   let runtime: Promise<initSqlJs.SqlJsStatic> | undefined;
+  const initializeRuntime = async (): Promise<initSqlJs.SqlJsStatic> => {
+    const wasmPath = path.join(installedPluginDirectory, 'sql-wasm.wasm');
+    const wasmContents = await dependencies.readFile(wasmPath);
+    return dependencies.initialize({
+      locateFile: (file) => path.join(installedPluginDirectory, file),
+      wasmBinary: Uint8Array.from(wasmContents).buffer,
+    });
+  };
 
   return {
     async open(databasePath) {
-      runtime ??= dependencies.initialize({
-        locateFile: (file) => path.join(installedPluginDirectory, file),
-      });
+      runtime ??= initializeRuntime();
       const [sql, contents] = await Promise.all([
         runtime,
         dependencies.readFile(databasePath),

@@ -13,12 +13,16 @@ describe('createSqliteFactory', () => {
     fixture.run("INSERT INTO visits (id, title) VALUES (1, 'First')");
     const bytes = fixture.export();
     fixture.close();
+    const wasmBytes = new Uint8Array([0, 97, 115, 109]);
 
     const initialize = vi.fn(async (config?: initSqlJs.SqlJsConfig) => {
       expect(config?.locateFile?.('sql-wasm.wasm', '')).toBe('/installed/plugin/sql-wasm.wasm');
+      expect(new Uint8Array(config?.wasmBinary ?? new ArrayBuffer(0)))
+        .toEqual(wasmBytes);
       return fixtureSql;
     });
-    const readFile = vi.fn(async () => bytes);
+    const readFile = vi.fn(async (filePath: string) =>
+      filePath.endsWith('sql-wasm.wasm') ? wasmBytes : bytes);
     const factory = createSqliteFactory('/installed/plugin', { initialize, readFile });
 
     const first = await factory.open('/tmp/one.sqlite');
@@ -30,7 +34,11 @@ describe('createSqliteFactory', () => {
       { ':id': 1 },
     )).toEqual([{ id: 1, title: 'First' }]);
     expect(initialize).toHaveBeenCalledTimes(1);
-    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(readFile.mock.calls.map(([filePath]) => filePath)).toEqual([
+      '/installed/plugin/sql-wasm.wasm',
+      '/tmp/one.sqlite',
+      '/tmp/two.sqlite',
+    ]);
     first.close();
     second.close();
   });
