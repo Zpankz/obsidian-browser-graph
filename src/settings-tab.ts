@@ -32,6 +32,8 @@ const browserDescriptions: Record<BrowserId, string> = {
   vivaldi: 'Import every detected Vivaldi profile.',
 };
 
+const saveError = 'Could not save this setting. Check that the vault is writable, then try again.';
+
 export class BrowserSyncSettingTab extends PluginSettingTab {
   private displaySequence = 0;
 
@@ -65,13 +67,24 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         .setValue(this.browserSyncPlugin.data.settings.enabledBrowsers[browser.browserId])
         .setDisabled(unavailable)
         .onChange(async (enabled) => {
-          await this.browserSyncPlugin.updateSettings({
-            ...this.browserSyncPlugin.data.settings,
-            enabledBrowsers: {
-              ...this.browserSyncPlugin.data.settings.enabledBrowsers,
-              [browser.browserId]: enabled,
-            },
-          });
+          try {
+            await this.browserSyncPlugin.updateSettings({
+              ...this.browserSyncPlugin.data.settings,
+              enabledBrowsers: {
+                ...this.browserSyncPlugin.data.settings.enabledBrowsers,
+                [browser.browserId]: enabled,
+              },
+            });
+            row.setErrorMessage(null);
+            toggle.setValue(
+              this.browserSyncPlugin.data.settings.enabledBrowsers[browser.browserId],
+            );
+          } catch {
+            toggle.setValue(
+              this.browserSyncPlugin.data.settings.enabledBrowsers[browser.browserId],
+            );
+            row.setErrorMessage(saveError);
+          }
         }));
     }
 
@@ -89,29 +102,42 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
           return;
         }
         outputFolder.setErrorMessage(null);
-        await this.browserSyncPlugin.updateSettings({
-          ...this.browserSyncPlugin.data.settings,
-          outputFolder: value,
-        });
+        try {
+          await this.browserSyncPlugin.updateSettings({
+            ...this.browserSyncPlugin.data.settings,
+            outputFolder: value,
+          });
+          text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
+        } catch {
+          text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
+          outputFolder.setErrorMessage(saveError);
+        }
       }));
 
-    new Setting(containerEl)
+    const layout = new Setting(containerEl)
       .setName('Layout')
-      .setDesc('Store notes directly in the output folder or in year folders.')
-      .addDropdown((dropdown) => dropdown
+      .setDesc('Store notes directly in the output folder or in year folders.');
+    layout.addDropdown((dropdown) => dropdown
         .addOptions({ flat: 'Flat', tiered: 'Tiered' })
         .setValue(this.browserSyncPlugin.data.settings.layout)
         .onChange(async (value) => {
-          await this.browserSyncPlugin.updateSettings({
-            ...this.browserSyncPlugin.data.settings,
-            layout: value as OutputLayout,
-          });
+          try {
+            await this.browserSyncPlugin.updateSettings({
+              ...this.browserSyncPlugin.data.settings,
+              layout: value as OutputLayout,
+            });
+            layout.setErrorMessage(null);
+            dropdown.setValue(this.browserSyncPlugin.data.settings.layout);
+          } catch {
+            dropdown.setValue(this.browserSyncPlugin.data.settings.layout);
+            layout.setErrorMessage(saveError);
+          }
         }));
 
-    new Setting(containerEl)
+    const notePeriod = new Setting(containerEl)
       .setName('Note period')
-      .setDesc('Choose how imported visits are grouped into notes.')
-      .addDropdown((dropdown) => dropdown
+      .setDesc('Choose how imported visits are grouped into notes.');
+    notePeriod.addDropdown((dropdown) => dropdown
         .addOptions({
           day: 'Day',
           week: 'ISO week',
@@ -120,10 +146,17 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         })
         .setValue(this.browserSyncPlugin.data.settings.period)
         .onChange(async (value) => {
-          await this.browserSyncPlugin.updateSettings({
-            ...this.browserSyncPlugin.data.settings,
-            period: value as NotePeriod,
-          });
+          try {
+            await this.browserSyncPlugin.updateSettings({
+              ...this.browserSyncPlugin.data.settings,
+              period: value as NotePeriod,
+            });
+            notePeriod.setErrorMessage(null);
+            dropdown.setValue(this.browserSyncPlugin.data.settings.period);
+          } catch {
+            dropdown.setValue(this.browserSyncPlugin.data.settings.period);
+            notePeriod.setErrorMessage(saveError);
+          }
         }));
 
     new Setting(containerEl)

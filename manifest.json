@@ -2,6 +2,6 @@
   "id": "obsidian-browser-sync",
   "name": "Browser Sync",
   "version": "0.1.0",
-  "minAppVersion": "1.0.0",
+  "minAppVersion": "1.13.0",
   "isDesktopOnly": true
 }

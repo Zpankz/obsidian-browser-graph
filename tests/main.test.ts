@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 
 interface ComponentRecord<T> {
   disabled: boolean;
@@ -224,6 +225,10 @@ class PluginHarness extends BrowserSyncPlugin {
   constructor(
     private readonly loaded: unknown,
     private readonly fakeRuntime: BrowserSyncRuntime,
+    private readonly persist: (
+      data: PersistedData,
+      callIndex: number,
+    ) => Promise<void> = async () => {},
   ) {
     super({ vault: {} } as App, { id: 'obsidian-browser-sync' } as PluginManifest);
   }
@@ -233,7 +238,9 @@ class PluginHarness extends BrowserSyncPlugin {
   }
 
   override async saveData(data: PersistedData): Promise<void> {
-    this.saved.push(structuredClone(data));
+    const snapshot = structuredClone(data);
+    this.saved.push(snapshot);
+    await this.persist(snapshot, this.saved.length - 1);
   }
 
   override addCommand(command: Command): Command {
@@ -248,6 +255,20 @@ class PluginHarness extends BrowserSyncPlugin {
   protected override createRuntime(): BrowserSyncRuntime {
     return this.fakeRuntime;
   }
+}
+
+function deferred(): {
+  promise: Promise<void>;
+  resolve(): void;
+  reject(error: Error): void;
+} {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function setting(name: string): SettingRecord {
@@ -305,6 +326,86 @@ describe('BrowserSyncPlugin', () => {
     await expect(plugin.updateSettings({ ...settings, outputFolder: '.obsidian/data' }))
       .rejects.toThrow('vault-relative');
     expect(plugin.saved).toHaveLength(1);
+  });
+
+  it('serializes overlapping saves and keeps a later success after an earlier failure', async () => {
+    const firstSave = deferred();
+    const plugin = new PluginHarness(undefined, runtime(), async (_data, index) => {
+      if (index === 0) {
+        await firstSave.promise;
+      }
+    });
+    await plugin.onload();
+    const firstSettings: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      layout: 'flat',
+    };
+    const secondSettings: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      period: 'week',
+    };
+
+    const first = plugin.updateSettings(firstSettings);
+    const second = plugin.updateSettings(secondSettings);
+    await vi.waitFor(() => expect(plugin.saved).toHaveLength(1));
+
+    firstSave.reject(new Error('Disk full'));
+    await expect(first).rejects.toThrow('Disk full');
+    await expect(second).resolves.toBeUndefined();
+
+    expect(plugin.saved).toHaveLength(2);
+    expect(plugin.saved[1].settings).toMatchObject({
+      layout: 'tiered',
+      period: 'week',
+    });
+    expect(plugin.data.settings).toMatchObject({
+      layout: 'tiered',
+      period: 'week',
+    });
+  });
+
+  it('eliminates out-of-order persistence and composes successful changes', async () => {
+    const firstSave = deferred();
+    const plugin = new PluginHarness(undefined, runtime(), async (_data, index) => {
+      if (index === 0) {
+        await firstSave.promise;
+      }
+    });
+    await plugin.onload();
+    const firstSettings: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      layout: 'flat',
+    };
+    const secondSettings: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      period: 'week',
+    };
+
+    const first = plugin.updateSettings(firstSettings);
+    const second = plugin.updateSettings(secondSettings);
+    await vi.waitFor(() => expect(plugin.saved).toHaveLength(1));
+    expect(plugin.saved[0].settings).toMatchObject({
+      layout: 'flat',
+      period: 'month',
+    });
+
+    firstSave.resolve();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+
+    expect(plugin.saved).toHaveLength(2);
+    expect(plugin.saved[1].settings).toMatchObject({
+      layout: 'flat',
+      period: 'week',
+    });
+    expect(plugin.data.settings).toMatchObject({
+      layout: 'flat',
+      period: 'week',
+    });
   });
 
   it('summarizes every outcome without exposing visited URLs', async () => {
@@ -461,5 +562,39 @@ describe('BrowserSyncSettingTab', () => {
 
     expect(output.error).toBeNull();
     expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('History/Imported');
+  });
+
+  it('restores a control and reports an actionable error when saving fails', async () => {
+    const plugin = new PluginHarness(
+      undefined,
+      runtime(),
+      async () => Promise.reject(new Error('Vault is read-only')),
+    );
+    await plugin.onload();
+    plugin.settingTabs[0].display();
+    const output = setting('Output folder');
+    if (output.text) {
+      output.text.value = 'Unsaved History';
+    }
+
+    await expect(output.text?.onChange?.('Unsaved History'))
+      .resolves.toBeUndefined();
+
+    expect(plugin.data.settings.outputFolder).toBe('Browser History');
+    expect(output.text?.value).toBe('Browser History');
+    expect(output.error).toContain('Could not save');
+    expect(output.error).toContain('try again');
+  });
+});
+
+describe('Obsidian compatibility metadata', () => {
+  it('declares the minimum version required by the settings and vault APIs', async () => {
+    const [manifest, versions] = await Promise.all([
+      readFile(new URL('../manifest.json', import.meta.url), 'utf8').then(JSON.parse),
+      readFile(new URL('../versions.json', import.meta.url), 'utf8').then(JSON.parse),
+    ]);
+
+    expect(manifest.minAppVersion).toBe('1.13.0');
+    expect(versions[manifest.version]).toBe('1.13.0');
   });
 });

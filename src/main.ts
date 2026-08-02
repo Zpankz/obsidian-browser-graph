@@ -59,6 +59,7 @@ export default class BrowserSyncPlugin extends Plugin {
   data: PersistedData = initialData();
   private runtime?: BrowserSyncRuntime;
   private lastProfileFailures = new Map<string, string>();
+  private persistenceQueue: Promise<void> = Promise.resolve();
 
   get platform(): DiscoveryPlatform {
     return this.runtime?.platform ?? currentPlatform();
@@ -75,26 +76,37 @@ export default class BrowserSyncPlugin extends Plugin {
     });
   }
 
-  async updateSettings(settings: PluginSettings): Promise<void> {
+  updateSettings(settings: PluginSettings): Promise<void> {
     if (!validSettings(settings)) {
-      throw new Error(
+      return Promise.reject(new Error(
         'Browser Sync settings require a safe vault-relative output folder and supported options.',
-      );
+      ));
     }
 
-    const previous = this.data.settings;
-    const normalized = migratePersistedData({
-      version: 1,
-      settings,
-      cursors: this.data.cursors,
-    }).settings;
-    this.data.settings = normalized;
-    try {
-      await this.saveData(this.data);
-    } catch (error) {
-      this.data.settings = previous;
-      throw error;
-    }
+    const requested = cloneSettings(settings);
+    const submissionBase = cloneSettings(this.data.settings);
+    return this.enqueuePersistence(async () => {
+      const composed = applySettingsDelta(
+        submissionBase,
+        requested,
+        this.data.settings,
+      );
+      const normalized = migratePersistedData({
+        version: 1,
+        settings: composed,
+        cursors: this.data.cursors,
+      }).settings;
+      if (!validSettings(normalized)) {
+        throw new Error('Browser Sync settings changed to an unsupported value.');
+      }
+
+      const snapshot = clonePersistedData({
+        ...this.data,
+        settings: normalized,
+      });
+      await this.saveData(snapshot);
+      this.data.settings = normalized;
+    });
   }
 
   async detectedProfileStatuses(): Promise<DetectedProfileStatus[]> {
@@ -122,7 +134,7 @@ export default class BrowserSyncPlugin extends Plugin {
           discover: runtime.discover,
           readVisits: runtime.readVisits,
           vault: runtime.vault,
-          saveData: async (data) => this.saveData(data),
+          saveData: (data) => this.persistCursorData(data),
         },
       );
       this.lastProfileFailures = new Map(
@@ -215,6 +227,25 @@ export default class BrowserSyncPlugin extends Plugin {
     }
     return this.runtime;
   }
+
+  private persistCursorData(data: PersistedData): Promise<void> {
+    return this.enqueuePersistence(async () => {
+      await this.saveData(clonePersistedData(data));
+    });
+  }
+
+  private enqueuePersistence(operation: () => Promise<void>): Promise<void> {
+    const result = this.persistenceQueue.then(operation);
+    this.persistenceQueue = result.then(
+      () => undefined,
+      async () => {
+        // Let the caller restore its in-memory transaction before the next
+        // queued snapshot is created.
+        await Promise.resolve();
+      },
+    );
+    return result;
+  }
 }
 
 export function readerFor(kind: BrowserProfile['readerKind']): BrowserHistoryReader {
@@ -290,6 +321,47 @@ function validSettings(settings: PluginSettings): boolean {
     && BROWSER_CATALOG.every(
       ({ browserId }) => typeof settings.enabledBrowsers[browserId] === 'boolean',
     );
+}
+
+function cloneSettings(settings: PluginSettings): PluginSettings {
+  return {
+    ...settings,
+    enabledBrowsers: { ...settings.enabledBrowsers },
+  };
+}
+
+function clonePersistedData(data: PersistedData): PersistedData {
+  return {
+    version: 1,
+    settings: cloneSettings(data.settings),
+    cursors: Object.fromEntries(
+      Object.entries(data.cursors).map(([sourceKey, cursor]) => [
+        sourceKey,
+        { ...cursor },
+      ]),
+    ),
+  };
+}
+
+function applySettingsDelta(
+  base: PluginSettings,
+  requested: PluginSettings,
+  current: PluginSettings,
+): PluginSettings {
+  const enabledBrowsers = { ...current.enabledBrowsers };
+  for (const { browserId } of BROWSER_CATALOG) {
+    if (base.enabledBrowsers[browserId] !== requested.enabledBrowsers[browserId]) {
+      enabledBrowsers[browserId] = requested.enabledBrowsers[browserId];
+    }
+  }
+  return {
+    enabledBrowsers,
+    outputFolder: base.outputFolder === requested.outputFolder
+      ? current.outputFolder
+      : requested.outputFolder,
+    layout: base.layout === requested.layout ? current.layout : requested.layout,
+    period: base.period === requested.period ? current.period : requested.period,
+  };
 }
 
 function completionNotice(summary: ImportSummary): string {
