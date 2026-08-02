@@ -1,4 +1,5 @@
 import esbuild from 'esbuild';
+import { copyFile } from 'node:fs/promises';
 
 const isProduction = process.argv[2] === 'production';
 const context = await esbuild.context({
@@ -16,6 +17,7 @@ const context = await esbuild.context({
 if (isProduction) {
   await context.rebuild();
   await context.dispose();
+  await copyFile('node_modules/sql.js/dist/sql-wasm.wasm', 'sql-wasm.wasm');
 } else {
   await context.watch();
 }
