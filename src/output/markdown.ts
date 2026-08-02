@@ -19,18 +19,36 @@ function replaceControlCharacters(value: string, replacement: string): string {
 }
 
 function safeTitle(title: string): string {
-  return replaceControlCharacters(title, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return safeLabel(title)
+    .replace(/\\/g, '\\\\')
     .replace(/\[/g, '\\[')
     .replace(/\]/g, '\\]');
 }
 
+function safeLabel(label: string): string {
+  return replaceControlCharacters(label, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function escapeMarkdownDestination(url: string): string {
+  const encodedDelimiters: Record<string, string> = {
+    '\\': '%5C',
+    '(': '%28',
+    ')': '%29',
+    '[': '%5B',
+    ']': '%5D',
+    '<': '%3C',
+    '>': '%3E',
+  };
+  return Array.from(url, (character) => encodedDelimiters[character] ?? character).join('');
+}
+
 function safeUrl(url: string): string {
   try {
-    return new URL(url).toString();
+    return escapeMarkdownDestination(new URL(url).toString());
   } catch {
-    return replaceControlCharacters(url, ' ').replace(/\s/g, encodeURIComponent);
+    return escapeMarkdownDestination(
+      replaceControlCharacters(url, ' ').replace(/\s/g, encodeURIComponent),
+    );
   }
 }
 
@@ -52,7 +70,9 @@ export function renderVisit(visit: NormalizedVisit): string {
   const url = safeUrl(visit.url);
   const title = safeTitle(visit.title) || url;
   const markerSource = visit.browserId;
-  return `- ${localTime(visit.visitedAt)} [${title}](${url}) — ${visit.browserName} / ${visit.profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
+  const browserName = safeLabel(visit.browserName);
+  const profileName = safeLabel(visit.profileName);
+  return `- ${localTime(visit.visitedAt)} [${title}](${url}) — ${browserName} / ${profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
 }
 
 export function extractImportedIds(markdown: string): Set<string> {
