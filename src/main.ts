@@ -13,6 +13,7 @@ import type { BrowserHistoryReader } from './browsers/reader';
 import { SafariReader } from './browsers/safari';
 import type {
   BrowserProfile,
+  BrowserId,
   ImportSummary,
   PersistedData,
   PluginSettings,
@@ -22,7 +23,11 @@ import type {
 import { ObsidianVaultPort } from './obsidian-vault';
 import { BROWSER_CATALOG, type DiscoveryPlatform } from './platform/catalog';
 import { discoverProfiles, type FileSystemPort } from './platform/discovery';
-import { BrowserSyncSettingTab, type DetectedProfileStatus } from './settings-tab';
+import {
+  BrowserSyncSettingTab,
+  type DetectedProfileStatus,
+  type PluginSettingField,
+} from './settings-tab';
 import { DEFAULT_SETTINGS, isSafeVaultFolder, migratePersistedData } from './settings';
 import { createSqliteFactory, type SqliteFactory } from './sql/sqlite';
 import { withDatabaseSnapshot } from './sql/snapshot';
@@ -57,6 +62,7 @@ const initialData = (): PersistedData => ({
 
 export default class BrowserSyncPlugin extends Plugin {
   data: PersistedData = initialData();
+  private committedData: PersistedData = initialData();
   private runtime?: BrowserSyncRuntime;
   private lastProfileFailures = new Map<string, string>();
   private persistenceQueue: Promise<void> = Promise.resolve();
@@ -66,7 +72,9 @@ export default class BrowserSyncPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    this.data = migratePersistedData(await this.loadData());
+    const loaded = migratePersistedData(await this.loadData());
+    this.data = clonePersistedData(loaded);
+    this.committedData = clonePersistedData(loaded);
     this.runtime = this.createRuntime();
     this.addSettingTab(new BrowserSyncSettingTab(this.app, this));
     this.addCommand({
@@ -76,36 +84,35 @@ export default class BrowserSyncPlugin extends Plugin {
     });
   }
 
-  updateSettings(settings: PluginSettings): Promise<void> {
+  updateSettings(
+    settings: PluginSettings,
+    changedFields: readonly PluginSettingField[],
+  ): Promise<void> {
     if (!validSettings(settings)) {
       return Promise.reject(new Error(
         'Browser Sync settings require a safe vault-relative output folder and supported options.',
       ));
     }
 
-    const requested = cloneSettings(settings);
-    const submissionBase = cloneSettings(this.data.settings);
+    const patch = settingsPatch(settings, changedFields);
     return this.enqueuePersistence(async () => {
-      const composed = applySettingsDelta(
-        submissionBase,
-        requested,
-        this.data.settings,
-      );
+      const composed = applySettingsPatch(this.committedData.settings, patch);
       const normalized = migratePersistedData({
         version: 1,
         settings: composed,
-        cursors: this.data.cursors,
+        cursors: this.committedData.cursors,
       }).settings;
       if (!validSettings(normalized)) {
         throw new Error('Browser Sync settings changed to an unsupported value.');
       }
 
       const snapshot = clonePersistedData({
-        ...this.data,
+        ...this.committedData,
         settings: normalized,
       });
       await this.saveData(snapshot);
-      this.data.settings = normalized;
+      this.committedData = snapshot;
+      this.data.settings = cloneSettings(normalized);
     });
   }
 
@@ -230,7 +237,13 @@ export default class BrowserSyncPlugin extends Plugin {
 
   private persistCursorData(data: PersistedData): Promise<void> {
     return this.enqueuePersistence(async () => {
-      await this.saveData(clonePersistedData(data));
+      const snapshot = clonePersistedData({
+        version: 1,
+        settings: this.committedData.settings,
+        cursors: data.cursors,
+      });
+      await this.saveData(snapshot);
+      this.committedData = snapshot;
     });
   }
 
@@ -343,24 +356,45 @@ function clonePersistedData(data: PersistedData): PersistedData {
   };
 }
 
-function applySettingsDelta(
-  base: PluginSettings,
+interface SettingsPatch {
+  enabledBrowsers: Partial<Record<BrowserId, boolean>>;
+  outputFolder?: string;
+  layout?: PluginSettings['layout'];
+  period?: PluginSettings['period'];
+}
+
+function settingsPatch(
   requested: PluginSettings,
-  current: PluginSettings,
-): PluginSettings {
-  const enabledBrowsers = { ...current.enabledBrowsers };
-  for (const { browserId } of BROWSER_CATALOG) {
-    if (base.enabledBrowsers[browserId] !== requested.enabledBrowsers[browserId]) {
-      enabledBrowsers[browserId] = requested.enabledBrowsers[browserId];
+  changedFields: readonly PluginSettingField[],
+): SettingsPatch {
+  const patch: SettingsPatch = { enabledBrowsers: {} };
+  for (const field of changedFields) {
+    if (field === 'outputFolder') {
+      patch.outputFolder = requested.outputFolder;
+    } else if (field === 'layout') {
+      patch.layout = requested.layout;
+    } else if (field === 'period') {
+      patch.period = requested.period;
+    } else {
+      const browserId = field.slice('enabledBrowsers.'.length) as BrowserId;
+      patch.enabledBrowsers[browserId] = requested.enabledBrowsers[browserId];
     }
   }
+  return patch;
+}
+
+function applySettingsPatch(
+  current: PluginSettings,
+  patch: SettingsPatch,
+): PluginSettings {
   return {
-    enabledBrowsers,
-    outputFolder: base.outputFolder === requested.outputFolder
-      ? current.outputFolder
-      : requested.outputFolder,
-    layout: base.layout === requested.layout ? current.layout : requested.layout,
-    period: base.period === requested.period ? current.period : requested.period,
+    enabledBrowsers: {
+      ...current.enabledBrowsers,
+      ...patch.enabledBrowsers,
+    },
+    outputFolder: patch.outputFolder ?? current.outputFolder,
+    layout: patch.layout ?? current.layout,
+    period: patch.period ?? current.period,
   };
 }
 

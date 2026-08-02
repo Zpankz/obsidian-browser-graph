@@ -15,10 +15,19 @@ export interface DetectedProfileStatus {
   status: string;
 }
 
+export type PluginSettingField =
+  | 'outputFolder'
+  | 'layout'
+  | 'period'
+  | `enabledBrowsers.${BrowserId}`;
+
 export interface BrowserSyncSettingsHost extends Plugin {
   data: { settings: PluginSettings };
   platform: DiscoveryPlatform;
-  updateSettings(settings: PluginSettings): Promise<void>;
+  updateSettings(
+    settings: PluginSettings,
+    changedFields: readonly PluginSettingField[],
+  ): Promise<void>;
   detectedProfileStatuses(): Promise<DetectedProfileStatus[]>;
 }
 
@@ -68,13 +77,16 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         .setDisabled(unavailable)
         .onChange(async (enabled) => {
           try {
-            await this.browserSyncPlugin.updateSettings({
-              ...this.browserSyncPlugin.data.settings,
-              enabledBrowsers: {
-                ...this.browserSyncPlugin.data.settings.enabledBrowsers,
-                [browser.browserId]: enabled,
+            await this.browserSyncPlugin.updateSettings(
+              {
+                ...this.browserSyncPlugin.data.settings,
+                enabledBrowsers: {
+                  ...this.browserSyncPlugin.data.settings.enabledBrowsers,
+                  [browser.browserId]: enabled,
+                },
               },
-            });
+              [`enabledBrowsers.${browser.browserId}`],
+            );
             row.setErrorMessage(null);
             toggle.setValue(
               this.browserSyncPlugin.data.settings.enabledBrowsers[browser.browserId],
@@ -103,10 +115,13 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         }
         outputFolder.setErrorMessage(null);
         try {
-          await this.browserSyncPlugin.updateSettings({
-            ...this.browserSyncPlugin.data.settings,
-            outputFolder: value,
-          });
+          await this.browserSyncPlugin.updateSettings(
+            {
+              ...this.browserSyncPlugin.data.settings,
+              outputFolder: value,
+            },
+            ['outputFolder'],
+          );
           text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
         } catch {
           text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
@@ -122,10 +137,13 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         .setValue(this.browserSyncPlugin.data.settings.layout)
         .onChange(async (value) => {
           try {
-            await this.browserSyncPlugin.updateSettings({
-              ...this.browserSyncPlugin.data.settings,
-              layout: value as OutputLayout,
-            });
+            await this.browserSyncPlugin.updateSettings(
+              {
+                ...this.browserSyncPlugin.data.settings,
+                layout: value as OutputLayout,
+              },
+              ['layout'],
+            );
             layout.setErrorMessage(null);
             dropdown.setValue(this.browserSyncPlugin.data.settings.layout);
           } catch {
@@ -147,10 +165,13 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         .setValue(this.browserSyncPlugin.data.settings.period)
         .onChange(async (value) => {
           try {
-            await this.browserSyncPlugin.updateSettings({
-              ...this.browserSyncPlugin.data.settings,
-              period: value as NotePeriod,
-            });
+            await this.browserSyncPlugin.updateSettings(
+              {
+                ...this.browserSyncPlugin.data.settings,
+                period: value as NotePeriod,
+              },
+              ['period'],
+            );
             notePeriod.setErrorMessage(null);
             dropdown.setValue(this.browserSyncPlugin.data.settings.period);
           } catch {

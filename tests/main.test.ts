@@ -183,7 +183,9 @@ import BrowserSyncPlugin, {
 } from '../src/main';
 import { BrowserSyncSettingTab } from '../src/settings-tab';
 import { DEFAULT_SETTINGS } from '../src/settings';
+import { runImport } from '../src/sync/importer';
 import { fakeVault } from './helpers/fake-vault';
+import { visit } from './helpers/visits';
 
 const emptySummary: ImportSummary = {
   imported: 0,
@@ -221,6 +223,7 @@ class PluginHarness extends BrowserSyncPlugin {
   readonly commands: Command[] = [];
   readonly settingTabs: PluginSettingTab[] = [];
   readonly saved: PersistedData[] = [];
+  readonly persisted: PersistedData[] = [];
 
   constructor(
     private readonly loaded: unknown,
@@ -241,6 +244,7 @@ class PluginHarness extends BrowserSyncPlugin {
     const snapshot = structuredClone(data);
     this.saved.push(snapshot);
     await this.persist(snapshot, this.saved.length - 1);
+    this.persisted.push(snapshot);
   }
 
   override addCommand(command: Command): Command {
@@ -319,11 +323,19 @@ describe('BrowserSyncPlugin', () => {
       layout: 'flat',
       period: 'week',
     };
-    await plugin.updateSettings(settings);
+    await plugin.updateSettings(settings, [
+      'enabledBrowsers.edge',
+      'outputFolder',
+      'layout',
+      'period',
+    ]);
 
     expect(plugin.data.settings).toEqual(settings);
     expect(plugin.saved.at(-1)?.settings).toEqual(settings);
-    await expect(plugin.updateSettings({ ...settings, outputFolder: '.obsidian/data' }))
+    await expect(plugin.updateSettings(
+      { ...settings, outputFolder: '.obsidian/data' },
+      ['outputFolder'],
+    ))
       .rejects.toThrow('vault-relative');
     expect(plugin.saved).toHaveLength(1);
   });
@@ -347,8 +359,8 @@ describe('BrowserSyncPlugin', () => {
       period: 'week',
     };
 
-    const first = plugin.updateSettings(firstSettings);
-    const second = plugin.updateSettings(secondSettings);
+    const first = plugin.updateSettings(firstSettings, ['layout']);
+    const second = plugin.updateSettings(secondSettings, ['period']);
     await vi.waitFor(() => expect(plugin.saved).toHaveLength(1));
 
     firstSave.reject(new Error('Disk full'));
@@ -385,8 +397,8 @@ describe('BrowserSyncPlugin', () => {
       period: 'week',
     };
 
-    const first = plugin.updateSettings(firstSettings);
-    const second = plugin.updateSettings(secondSettings);
+    const first = plugin.updateSettings(firstSettings, ['layout']);
+    const second = plugin.updateSettings(secondSettings, ['period']);
     await vi.waitFor(() => expect(plugin.saved).toHaveLength(1));
     expect(plugin.saved[0].settings).toMatchObject({
       layout: 'flat',
@@ -406,6 +418,110 @@ describe('BrowserSyncPlugin', () => {
       layout: 'flat',
       period: 'week',
     });
+  });
+
+  it('uses the last same-field submission when a pending value is reverted', async () => {
+    const firstSave = deferred();
+    const plugin = new PluginHarness(undefined, runtime(), async (_data, index) => {
+      if (index === 0) {
+        await firstSave.promise;
+      }
+    });
+    await plugin.onload();
+    const original = plugin.data.settings.layout;
+    const changed: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      layout: 'flat',
+    };
+    const reverted: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      layout: original,
+    };
+
+    const first = plugin.updateSettings(changed, ['layout']);
+    const second = plugin.updateSettings(reverted, ['layout']);
+    await vi.waitFor(() => expect(plugin.saved).toHaveLength(1));
+
+    firstSave.resolve();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+
+    expect(plugin.saved).toHaveLength(2);
+    expect(plugin.saved[1].settings.layout).toBe(original);
+    expect(plugin.persisted.at(-1)?.settings.layout).toBe(original);
+    expect(plugin.data.settings.layout).toBe(original);
+  });
+
+  it('never persists a tentative cursor through a queued settings save', async () => {
+    const firstSave = deferred();
+    const profile: BrowserProfile = {
+      sourceKey: 'chrome:tentative',
+      browserId: 'chrome',
+      browserName: 'Google Chrome',
+      profileId: 'Default',
+      profileName: 'Default',
+      databasePath: '/synthetic/History',
+      readerKind: 'chromium',
+    };
+    const vault = fakeVault();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const plugin = new PluginHarness(
+      undefined,
+      runtime({
+        vault,
+        discover: vi.fn(async () => [profile]),
+        readVisits: vi.fn(async () => [visit({
+          sourceKey: profile.sourceKey,
+          browserId: profile.browserId,
+          browserName: profile.browserName,
+          profileId: profile.profileId,
+          profileName: profile.profileName,
+          sourceVisitId: '9',
+        })]),
+        runImporter: runImport,
+      }),
+      async (_data, index) => {
+        if (index === 0) {
+          await firstSave.promise;
+        }
+        if (index === 2) {
+          throw new Error('Cursor persistence failed');
+        }
+      },
+    );
+    await plugin.onload();
+    const layout: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      layout: 'flat',
+    };
+    const period: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      period: 'week',
+    };
+
+    const firstSettingsSave = plugin.updateSettings(layout, ['layout']);
+    const secondSettingsSave = plugin.updateSettings(period, ['period']);
+    const importing = plugin.importBrowserHistory();
+    await vi.waitFor(() => {
+      expect(plugin.data.cursors[profile.sourceKey]?.sourceVisitId).toBe('9');
+    });
+
+    firstSave.resolve();
+    await expect(firstSettingsSave).resolves.toBeUndefined();
+    await expect(secondSettingsSave).resolves.toBeUndefined();
+    await expect(importing).resolves.toBeUndefined();
+
+    expect(plugin.saved).toHaveLength(3);
+    expect(plugin.persisted).toHaveLength(2);
+    expect(plugin.persisted.every(
+      (payload) => payload.cursors[profile.sourceKey] === undefined,
+    )).toBe(true);
+    expect(plugin.data.cursors[profile.sourceKey]).toBeUndefined();
+    consoleError.mockRestore();
   });
 
   it('summarizes every outcome without exposing visited URLs', async () => {
