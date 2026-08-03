@@ -127,7 +127,7 @@ describe('release bundle', () => {
       const versions = JSON.parse(await readFile('versions.json', 'utf8'));
       expect(manifest).toMatchObject({
         id: 'browser-history-sync',
-        author: 'git-akihakune',
+        author: 'Aki Hakune',
         description: expect.any(String),
         isDesktopOnly: true,
         minAppVersion: '1.13.0',
