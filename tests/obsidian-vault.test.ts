@@ -141,6 +141,20 @@ describe('ObsidianVaultPort', () => {
     ]);
   });
 
+  it('can restrict a Markdown scan to one safe vault folder', async () => {
+    api.files.set('History/one.md', new TFile('History/one.md'));
+    api.files.set('History/Nested/two.md', new TFile('History/Nested/two.md'));
+    api.files.set('Archive/three.md', new TFile('Archive/three.md'));
+    api.contents.set('History/one.md', 'one');
+    api.contents.set('History/Nested/two.md', 'two');
+    api.contents.set('Archive/three.md', 'three');
+    const markdown: string[] = [];
+
+    await vault.scanMarkdownFiles((content) => markdown.push(content), 'History');
+
+    expect(markdown).toEqual(['two', 'one']);
+  });
+
   it('rechecks after a concurrent folder creator wins the race', async () => {
     api.raceFolder = 'Browser History/2026';
 

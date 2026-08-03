@@ -60,5 +60,8 @@ export interface VaultPort {
   create(path: string, content: string): Promise<void>;
   append(path: string, content: string): Promise<void>;
   ensureFolder(path: string): Promise<void>;
-  scanMarkdownFiles(visit: (markdown: string) => void): Promise<void>;
+  scanMarkdownFiles(
+    visit: (markdown: string) => void,
+    root?: string,
+  ): Promise<void>;
 }

@@ -52,6 +52,7 @@ npm run test:release
 1. Open **Settings → Browser Sync** and review the browser sources, output folder, layout, and note period.
 2. Open the command palette and run **Import browser history**.
 3. Run the same command whenever you want to import newer visits.
+4. If generated notes were partially deleted or you want to backfill a different existing output folder, run **Rebuild browser history output**.
 
 The plugin discovers all profiles for every enabled browser and writes a separate entry for each visit. Two visits to the same URL remain two entries. Very recent visits still present only in a browser's uncheckpointed write-ahead log may appear on a later run.
 
@@ -107,6 +108,8 @@ The plugin also saves a timestamp and source-visit-ID high-water cursor for each
 If state is deleted or omitted from Git, the local device token is cleared, or the saved hash does not match, the next import invalidates cursors and rescans from the beginning. Copying `data.json` to another device is rejected even when both devices report identical platform, hostname, home-directory, and browser paths. Existing hidden markers remain device-independent and prevent duplicate entries. Keep the markers in generated notes if you edit them.
 
 Each import uses an immutable snapshot of the settings that were active when the command was invoked. Settings changed while an import is running apply only to the next run.
+
+If the active output folder is missing, a normal import automatically clears the local browser cursors and rebuilds that folder from all history still available in the enabled browsers. The rebuild scans hidden markers only inside the active output folder, so an obsolete copy elsewhere in the vault does not block restoration. If the folder still exists but some notes are missing, or a newly selected destination already exists, use **Rebuild browser history output** to trigger the same recovery explicitly. Surviving marked entries in the active folder are retained without duplication.
 
 ## Safari permission and retry guidance
 

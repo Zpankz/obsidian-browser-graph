@@ -17,7 +17,8 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
 
   return {
     async exists(path) {
-      return files.has(path);
+      return files.has(path)
+        || [...files.keys()].some((candidate) => candidate.startsWith(`${path}/`));
     },
     async read(path) {
       const content = files.get(path);
@@ -43,9 +44,10 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
       files.set(path, current + content);
     },
     async ensureFolder() {},
-    async scanMarkdownFiles(visit) {
+    async scanMarkdownFiles(visit, root) {
       const contents = [...files.entries()]
-        .filter(([path]) => path.toLowerCase().endsWith('.md'))
+        .filter(([path]) => path.toLowerCase().endsWith('.md')
+          && (root === undefined || path.startsWith(`${root}/`)))
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([, content]) => content);
       for (const content of contents) {

@@ -96,6 +96,11 @@ export default class BrowserSyncPlugin extends Plugin {
       name: 'Import browser history',
       callback: () => this.importBrowserHistory(),
     });
+    this.addCommand({
+      id: 'rebuild-browser-history-output',
+      name: 'Rebuild browser history output',
+      callback: () => this.importBrowserHistory(true),
+    });
   }
 
   updateSettings(
@@ -139,7 +144,7 @@ export default class BrowserSyncPlugin extends Plugin {
     }));
   }
 
-  async importBrowserHistory(): Promise<void> {
+  async importBrowserHistory(rebuild = false): Promise<void> {
     const runtime = this.requireRuntime();
     const settings = cloneSettings(this.data.settings);
     if (!validSettings(settings)) {
@@ -150,9 +155,15 @@ export default class BrowserSyncPlugin extends Plugin {
     }
 
     try {
+      const outputFolderExists = await runtime.vault.exists(settings.outputFolder);
       await runtime.vault.ensureFolder(settings.outputFolder);
+      const rebuildOutput = rebuild || !outputFolderExists;
       const summary = await runtime.runImporter(
-        { data: this.data, settings },
+        {
+          data: this.data,
+          settings,
+          ...(rebuildOutput ? { rebuild: true } : {}),
+        },
         {
           discover: runtime.discover,
           readVisits: runtime.readVisits,

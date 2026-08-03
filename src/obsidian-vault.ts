@@ -44,8 +44,14 @@ export class ObsidianVaultPort implements VaultPort {
     }
   }
 
-  async scanMarkdownFiles(visit: (markdown: string) => void): Promise<void> {
+  async scanMarkdownFiles(
+    visit: (markdown: string) => void,
+    root?: string,
+  ): Promise<void> {
+    const normalizedRoot = root === undefined ? undefined : safeVaultPath(root);
     const files = this.vault.getMarkdownFiles()
+      .filter((file) => normalizedRoot === undefined
+        || file.path.startsWith(`${normalizedRoot}/`))
       .sort((left, right) => left.path.localeCompare(right.path));
     for (const file of files) {
       visit(await this.vault.read(file));

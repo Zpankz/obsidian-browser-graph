@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type {
   BrowserProfile,
   NormalizedVisit,
@@ -198,6 +198,103 @@ it('uses vault-wide markers across output folder, layout, period, timezone, and 
     'Old Output/2026/2026-08/2026-W32/2026-08-02.md',
   )).toBe(preserved);
   expect(() => vault.readText('New Output/2026.md')).toThrow('Missing vault file');
+});
+
+it('rebuilds from the beginning and ignores markers outside the active output folder', async () => {
+  const input = normalized({ sourceVisitId: '41' });
+  const previousCursor = {
+    visitedAtMs: input.visitedAt.getTime(),
+    sourceVisitId: input.sourceVisitId,
+  };
+  const state = persisted({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+      outputFolder: 'New Output',
+    },
+    cursors: { [profile.sourceKey]: previousCursor },
+  });
+  const seenCursors: Array<typeof previousCursor | undefined> = [];
+  const saved: PersistedData[] = [];
+  const vault = fakeVault({
+    files: {
+      'Old Output/2026/2026-08.md': renderVisit(input),
+    },
+  });
+
+  const result = await runImport(
+    { data: state, rebuild: true },
+    {
+      discover: async () => [profile],
+      readVisits: async (_profile, cursor) => {
+        seenCursors.push(cursor);
+        return [input];
+      },
+      vault,
+      saveData: async (data) => {
+        saved.push(structuredClone(data));
+      },
+    },
+  );
+
+  expect(seenCursors).toEqual([undefined]);
+  expect(saved[0]?.cursors).toEqual({});
+  expect(result).toMatchObject({ imported: 1, alreadyPresent: 0 });
+  expect(vault.readText('New Output/2026/2026-08.md')).toContain('Example page');
+});
+
+it('keeps surviving active-output entries while restoring missing ones', async () => {
+  const surviving = normalized({ sourceVisitId: '51', title: 'Surviving visit' });
+  const missing = normalized({
+    sourceVisitId: '52',
+    title: 'Missing visit',
+    visitedAt: new Date('2026-08-03T12:35:56Z'),
+  });
+  const state = persisted({
+    cursors: {
+      [profile.sourceKey]: {
+        visitedAtMs: missing.visitedAt.getTime(),
+        sourceVisitId: missing.sourceVisitId,
+      },
+    },
+  });
+  const vault = fakeVaultWithRenderedVisit(surviving);
+
+  const result = await runImport(
+    { data: state, rebuild: true },
+    deps({ vault, visits: [surviving, missing] }),
+  );
+
+  expect(result).toMatchObject({ imported: 1, alreadyPresent: 1 });
+  const rebuilt = vault.readText('Browser History/2026/2026-08.md');
+  expect(rebuilt.match(/Surviving visit/g)).toHaveLength(1);
+  expect(rebuilt.match(/Missing visit/g)).toHaveLength(1);
+});
+
+it('restores cursors and stops before reading browsers if rebuild state cannot be saved', async () => {
+  const previousCursor = {
+    visitedAtMs: Date.parse('2026-08-03T12:34:56Z'),
+    sourceVisitId: '40',
+  };
+  const state = persisted({
+    cursors: { [profile.sourceKey]: previousCursor },
+  });
+  const discover = vi.fn(async () => [profile]);
+
+  await expect(runImport(
+    { data: state, rebuild: true },
+    {
+      discover,
+      readVisits: async () => [],
+      vault: fakeVault(),
+      saveData: async () => {
+        throw new Error('Could not reset browser cursors');
+      },
+    },
+  )).rejects.toThrow('Could not reset browser cursors');
+
+  expect(state.cursors).toEqual({ [profile.sourceKey]: previousCursor });
+  expect(discover).not.toHaveBeenCalled();
 });
 
 it('does not treat markers in non-Markdown vault files as imported state', async () => {

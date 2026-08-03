@@ -339,15 +339,19 @@ describe('BrowserSyncPlugin', () => {
     obsidianMock.suggests.length = 0;
   });
 
-  it('registers exactly one manual import command and no startup import', async () => {
+  it('registers manual import and rebuild commands without importing on startup', async () => {
     const fakeRuntime = runtime();
     const plugin = new PluginHarness(undefined, fakeRuntime);
 
     await plugin.onload();
 
     expect(plugin.commands.map((command) => command.id))
-      .toEqual(['import-browser-history']);
+      .toEqual([
+        'import-browser-history',
+        'rebuild-browser-history-output',
+      ]);
     expect(plugin.commands[0].name).toBe('Import browser history');
+    expect(plugin.commands[1].name).toBe('Rebuild browser history output');
     expect(fakeRuntime.runImporter).not.toHaveBeenCalled();
     expect(fakeRuntime.discover).not.toHaveBeenCalled();
     expect(plugin.settingTabs).toHaveLength(1);
@@ -356,6 +360,43 @@ describe('BrowserSyncPlugin', () => {
     await plugin.commands[0].callback?.();
 
     expect(fakeRuntime.runImporter).toHaveBeenCalledOnce();
+
+    await plugin.commands[1].callback?.();
+
+    expect(fakeRuntime.runImporter).toHaveBeenLastCalledWith(
+      expect.objectContaining({ rebuild: true }),
+      expect.any(Object),
+    );
+  });
+
+  it('automatically requests a rebuild when the active output folder is missing', async () => {
+    const vault = fakeVault();
+    const runImporter = vi.fn(async () => emptySummary);
+    const plugin = new PluginHarness(undefined, runtime({ vault, runImporter }));
+    await plugin.onload();
+
+    await plugin.importBrowserHistory();
+
+    expect(runImporter).toHaveBeenCalledWith(
+      expect.objectContaining({ rebuild: true }),
+      expect.any(Object),
+    );
+  });
+
+  it('keeps an incremental import when the active output folder still exists', async () => {
+    const vault = fakeVault({
+      files: { 'Browser History/existing.md': '# Existing output' },
+    });
+    const runImporter = vi.fn(async () => emptySummary);
+    const plugin = new PluginHarness(undefined, runtime({ vault, runImporter }));
+    await plugin.onload();
+
+    await plugin.importBrowserHistory();
+
+    expect(runImporter).toHaveBeenCalledWith(
+      expect.not.objectContaining({ rebuild: true }),
+      expect.any(Object),
+    );
   });
 
   it('captures command settings before deferred folder preparation', async () => {

@@ -28,6 +28,7 @@ export interface ImportDependencies {
 export interface ImportRequest {
   data: PersistedData;
   settings?: PluginSettings;
+  rebuild?: boolean;
 }
 
 export class ImportAlreadyRunningError extends Error {
@@ -50,7 +51,15 @@ export async function runImport(
   importRunning = true;
   const settings = cloneSettings(request.settings ?? request.data.settings);
   try {
-    return await performImport(request, dependencies, settings);
+    if (request.rebuild) {
+      await resetCursorsForRebuild(request.data, dependencies.saveData);
+    }
+    return await performImport(
+      request,
+      dependencies,
+      settings,
+      request.rebuild ? settings.outputFolder : undefined,
+    );
   } finally {
     importRunning = false;
   }
@@ -76,6 +85,7 @@ async function performImport(
   request: ImportRequest,
   dependencies: ImportDependencies,
   settings: PluginSettings,
+  markerRoot?: string,
 ): Promise<ImportSummary> {
   const summary: ImportSummary = {
     imported: 0,
@@ -83,7 +93,7 @@ async function performImport(
     skippedProfiles: 0,
     failedProfiles: [],
   };
-  const managedIds = await readManagedMarkerIndex(dependencies.vault);
+  const managedIds = await readManagedMarkerIndex(dependencies.vault, markerRoot);
   const profiles = await dependencies.discover();
   const enabledProfiles = profiles.filter((profile) => {
     const enabled = settings.enabledBrowsers[profile.browserId];
@@ -252,14 +262,35 @@ async function readExisting(vault: VaultPort, path: string): Promise<string | un
   return await vault.exists(path) ? vault.read(path) : undefined;
 }
 
-async function readManagedMarkerIndex(vault: VaultPort): Promise<Set<string>> {
+async function readManagedMarkerIndex(
+  vault: VaultPort,
+  root?: string,
+): Promise<Set<string>> {
   const importedIds = new Set<string>();
   await vault.scanMarkdownFiles((content) => {
     for (const id of extractImportedIds(content)) {
       importedIds.add(id);
     }
-  });
+  }, root);
   return importedIds;
+}
+
+async function resetCursorsForRebuild(
+  data: PersistedData,
+  saveData: (data: PersistedData) => Promise<void>,
+): Promise<void> {
+  if (Object.keys(data.cursors).length === 0) {
+    return;
+  }
+
+  const previousCursors = data.cursors;
+  data.cursors = {};
+  try {
+    await saveData(data);
+  } catch (error) {
+    data.cursors = previousCursors;
+    throw error;
+  }
 }
 
 async function appendEntries(
