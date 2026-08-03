@@ -13,6 +13,7 @@ export type OutputLayout = 'flat' | 'tiered';
 export interface PluginSettings {
   enabledBrowsers: Record<BrowserId, boolean>;
   outputFolder: string;
+  fileNameTemplate: string;
   layout: OutputLayout;
   period: NotePeriod;
 }

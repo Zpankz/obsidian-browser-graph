@@ -5,7 +5,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['main.js', 'node_modules/', 'coverage/', '.obsidian/', 'release/'],
+    ignores: ['main.js', 'build/', 'node_modules/', 'coverage/', '.obsidian/', 'release/'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

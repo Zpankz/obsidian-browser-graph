@@ -23,6 +23,7 @@ import {
   type DeviceIdentityPort,
 } from './device-identity';
 import { ObsidianVaultPort } from './obsidian-vault';
+import { isSafeFileNameTemplate } from './output/file-name';
 import { BROWSER_CATALOG, type DiscoveryPlatform } from './platform/catalog';
 import { discoverProfiles, type FileSystemPort } from './platform/discovery';
 import {
@@ -355,6 +356,7 @@ function currentPlatform(): DiscoveryPlatform {
 
 function validSettings(settings: PluginSettings, configDir: string): boolean {
   return isSafeVaultFolder(settings.outputFolder, configDir)
+    && isSafeFileNameTemplate(settings.fileNameTemplate)
     && (settings.layout === 'flat' || settings.layout === 'tiered')
     && ['day', 'week', 'month', 'year'].includes(settings.period)
     && BROWSER_CATALOG.every(
@@ -386,6 +388,7 @@ function clonePersistedData(data: PersistedData): PersistedData {
 interface SettingsPatch {
   enabledBrowsers: Partial<Record<BrowserId, boolean>>;
   outputFolder?: string;
+  fileNameTemplate?: string;
   layout?: PluginSettings['layout'];
   period?: PluginSettings['period'];
 }
@@ -398,6 +401,8 @@ function settingsPatch(
   for (const field of changedFields) {
     if (field === 'outputFolder') {
       patch.outputFolder = requested.outputFolder;
+    } else if (field === 'fileNameTemplate') {
+      patch.fileNameTemplate = requested.fileNameTemplate;
     } else if (field === 'layout') {
       patch.layout = requested.layout;
     } else if (field === 'period') {
@@ -420,6 +425,7 @@ function applySettingsPatch(
       ...patch.enabledBrowsers,
     },
     outputFolder: patch.outputFolder ?? current.outputFolder,
+    fileNameTemplate: patch.fileNameTemplate ?? current.fileNameTemplate,
     layout: patch.layout ?? current.layout,
     period: patch.period ?? current.period,
   };

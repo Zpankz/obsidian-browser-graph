@@ -11,6 +11,7 @@ const RELEASE_ARTIFACTS = [
   'manifest.json',
   'styles.css',
 ] as const;
+const BUILD_DIRECTORY = 'build';
 
 interface StagedSqliteDatabase {
   all<T extends Record<string, unknown>>(sql: string): T[];
@@ -109,9 +110,14 @@ describe('release bundle', () => {
     const releaseDirectory = path.join(temporaryRoot, 'browser-history-sync');
 
     try {
+      expect((await readdir(BUILD_DIRECTORY)).sort())
+        .toEqual([...RELEASE_ARTIFACTS].sort());
       await mkdir(releaseDirectory);
       await Promise.all(RELEASE_ARTIFACTS.map((artifact) =>
-        copyFile(artifact, path.join(releaseDirectory, artifact))));
+        copyFile(
+          path.join(BUILD_DIRECTORY, artifact),
+          path.join(releaseDirectory, artifact),
+        )));
 
       expect((await readdir(releaseDirectory)).sort())
         .toEqual([...RELEASE_ARTIFACTS].sort());

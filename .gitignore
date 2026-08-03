@@ -3,6 +3,7 @@ node_modules/
 
 # Generated builds and test output
 main.js
+build/
 coverage/
 *.tsbuildinfo
 .eslintcache

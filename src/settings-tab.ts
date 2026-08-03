@@ -14,6 +14,7 @@ import type {
   PluginSettings,
 } from './domain';
 import { BROWSER_CATALOG, type DiscoveryPlatform } from './platform/catalog';
+import { isSafeFileNameTemplate } from './output/file-name';
 import { isSafeVaultFolder } from './settings';
 
 export interface DetectedProfileStatus {
@@ -23,6 +24,7 @@ export interface DetectedProfileStatus {
 
 export type PluginSettingField =
   | 'outputFolder'
+  | 'fileNameTemplate'
   | 'layout'
   | 'period'
   | `enabledBrowsers.${BrowserId}`;
@@ -96,6 +98,18 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         },
       },
       {
+        name: 'File name template',
+        desc: 'Customize note filenames with {period}. The .md extension is added automatically.',
+        control: {
+          type: 'text',
+          key: 'fileNameTemplate',
+          placeholder: '{period}',
+          validate: (value) => isSafeFileNameTemplate(value)
+            ? undefined
+            : 'Enter one portable filename containing {period}, without folders or other {placeholders}.',
+        },
+      },
+      {
         name: 'Layout',
         desc: 'Store notes directly in the output folder or in year folders.',
         control: {
@@ -131,7 +145,12 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
   }
 
   override getControlValue(key: string): unknown {
-    if (key === 'outputFolder' || key === 'layout' || key === 'period') {
+    if (
+      key === 'outputFolder'
+      || key === 'fileNameTemplate'
+      || key === 'layout'
+      || key === 'period'
+    ) {
       return this.browserSyncPlugin.data.settings[key];
     }
     const browserId = browserIdFromField(key);
@@ -150,6 +169,9 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
         throw new Error('The output folder is not a safe vault-relative path.');
       }
       updated = { ...settings, outputFolder: value };
+      field = key;
+    } else if (key === 'fileNameTemplate' && isSafeFileNameTemplate(value)) {
+      updated = { ...settings, fileNameTemplate: value };
       field = key;
     } else if (key === 'layout' && isPermittedValue(value, outputLayouts)) {
       updated = { ...settings, layout: value };

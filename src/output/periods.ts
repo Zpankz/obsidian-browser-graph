@@ -1,4 +1,5 @@
 import type { NotePeriod, PluginSettings } from '../domain';
+import { formatOutputFileName } from './file-name';
 
 export interface PeriodDescriptor {
   key: string;
@@ -67,22 +68,26 @@ function vaultSegments(folder: string): string[] {
 }
 
 export function destinationPath(
-  settings: Pick<PluginSettings, 'outputFolder' | 'layout' | 'period'>,
+  settings: Pick<
+    PluginSettings,
+    'outputFolder' | 'fileNameTemplate' | 'layout' | 'period'
+  >,
   date: Date,
 ): string {
   const descriptor = periodFor(date, settings.period);
   const segments = vaultSegments(settings.outputFolder);
+  const fileName = formatOutputFileName(settings.fileNameTemplate, descriptor.key);
 
   if (settings.layout === 'flat') {
-    return [...segments, `${descriptor.key}.md`].join('/');
+    return [...segments, fileName].join('/');
   }
 
   if (settings.period === 'year') {
-    return [...segments, `${descriptor.key}.md`].join('/');
+    return [...segments, fileName].join('/');
   }
 
   if (settings.period === 'month') {
-    return [...segments, descriptor.key.slice(0, 4), `${descriptor.key}.md`].join('/');
+    return [...segments, descriptor.key.slice(0, 4), fileName].join('/');
   }
 
   const monday = descriptor.isoMonday;
@@ -93,8 +98,8 @@ export function destinationPath(
   ];
 
   if (settings.period === 'week') {
-    return [...segments, ...weekTier, `${descriptor.key}.md`].join('/');
+    return [...segments, ...weekTier, fileName].join('/');
   }
 
-  return [...segments, ...weekTier, weekKey, `${descriptor.key}.md`].join('/');
+  return [...segments, ...weekTier, weekKey, fileName].join('/');
 }

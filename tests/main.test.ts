@@ -123,7 +123,7 @@ vi.mock('obsidian', () => {
                 .setValue(tab.getControlValue(control.key as string))
                 .onChange(save);
             });
-          } else if (control.type === 'folder') {
+          } else if (control.type === 'folder' || control.type === 'text') {
             setting.addText((text) => {
               const typedText = text as {
                 setPlaceholder(value: unknown): typeof typedText;
@@ -135,18 +135,20 @@ vi.mock('obsidian', () => {
                 .setPlaceholder(control.placeholder)
                 .setValue(tab.getControlValue(control.key as string))
                 .onChange(save);
-              obsidianMock.suggests.push({
-                getSuggestions: (query: string) => tab.app.vault
-                  .getAllLoadedFiles()
-                  .filter((folder: unknown) => (control.filter as (value: unknown) => boolean)(folder))
-                  .map((folder: { path: string }) => folder.path)
-                  .filter((path: string) => path.toLowerCase().includes(query.toLowerCase()))
-                  .sort((left: string, right: string) => left.localeCompare(right)),
-                selectSuggestion: (value: string) => {
-                  typedText.setValue(value);
-                  void save(value);
-                },
-              });
+              if (control.type === 'folder') {
+                obsidianMock.suggests.push({
+                  getSuggestions: (query: string) => tab.app.vault
+                    .getAllLoadedFiles()
+                    .filter((folder: unknown) => (control.filter as (value: unknown) => boolean)(folder))
+                    .map((folder: { path: string }) => folder.path)
+                    .filter((path: string) => path.toLowerCase().includes(query.toLowerCase()))
+                    .sort((left: string, right: string) => left.localeCompare(right)),
+                  selectSuggestion: (value: string) => {
+                    typedText.setValue(value);
+                    void save(value);
+                  },
+                });
+              }
             });
           }
         }
@@ -967,6 +969,7 @@ describe('BrowserSyncSettingTab', () => {
     expect(setting('Safari').disabled).toBe(true);
     expect(setting('Safari').toggle?.disabled).toBe(true);
     expect(setting('Output folder').text?.value).toBe('Browser History');
+    expect(setting('File name template').text?.value).toBe('{period}');
     expect(setting('Layout').dropdown?.options).toEqual({
       flat: 'Flat',
       tiered: 'Tiered',
@@ -997,6 +1000,22 @@ describe('BrowserSyncSettingTab', () => {
 
     expect(output.error).toBeNull();
     expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('History/Imported');
+  });
+
+  it('validates and saves a custom file name template', async () => {
+    const plugin = new PluginHarness(undefined, runtime());
+    await plugin.onload();
+    plugin.settingTabs[0].display();
+    const template = setting('File name template');
+
+    await template.text?.onChange?.('same-name');
+    expect(template.error).toContain('{period}');
+    expect(plugin.saved).toHaveLength(0);
+
+    await template.text?.onChange?.('Browser history - {period}');
+    expect(template.error).toBeNull();
+    expect(plugin.saved.at(-1)?.settings.fileNameTemplate)
+      .toBe('Browser history - {period}');
   });
 
   it('does not erase a trailing separator while typing a nested output folder', async () => {

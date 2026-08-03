@@ -11,6 +11,10 @@ import {
   resolveDeviceIdentity,
 } from './device-identity';
 import { isSafeVisitTimestamp } from './browsers/reader';
+import {
+  DEFAULT_FILE_NAME_TEMPLATE,
+  isSafeFileNameTemplate,
+} from './output/file-name';
 import { normalizeSafeVaultPath } from './vault-path';
 
 export { hashDeviceIdentityToken, resolveDeviceIdentity };
@@ -41,6 +45,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     vivaldi: true,
   },
   outputFolder: 'Browser History',
+  fileNameTemplate: DEFAULT_FILE_NAME_TEMPLATE,
   layout: 'tiered',
   period: 'month',
 };
@@ -91,10 +96,14 @@ function migrateSettings(value: unknown, configDir?: string): PluginSettings {
   const outputFolder = isSafeVaultFolder(value.outputFolder, configDir)
     ? normalizedVaultFolder(value.outputFolder, configDir) ?? DEFAULT_SETTINGS.outputFolder
     : DEFAULT_SETTINGS.outputFolder;
+  const fileNameTemplate = isSafeFileNameTemplate(value.fileNameTemplate)
+    ? value.fileNameTemplate
+    : DEFAULT_SETTINGS.fileNameTemplate;
 
   return {
     enabledBrowsers,
     outputFolder,
+    fileNameTemplate,
     layout: settingValue(value.layout, outputLayouts, DEFAULT_SETTINGS.layout),
     period: settingValue(value.period, notePeriods, DEFAULT_SETTINGS.period),
   };

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isSafeFileNameTemplate } from '../src/output/file-name';
 import {
   DEFAULT_SETTINGS,
   hashDeviceIdentityToken,
@@ -22,6 +23,7 @@ describe('migratePersistedData', () => {
       cursors: {},
     });
     expect(DEFAULT_SETTINGS.outputFolder).toBe('Browser History');
+    expect(DEFAULT_SETTINGS.fileNameTemplate).toBe('{period}');
     expect(DEFAULT_SETTINGS.layout).toBe('tiered');
     expect(DEFAULT_SETTINGS.period).toBe('month');
   });
@@ -32,6 +34,7 @@ describe('migratePersistedData', () => {
       cursors: { firefox: { visitedAtMs: 'bad' } },
     }, DEVICE_A, NOW);
     expect(result.settings.outputFolder).toBe('Browser History');
+    expect(result.settings.fileNameTemplate).toBe('{period}');
     expect(result.settings.layout).toBe('tiered');
     expect(result.settings.period).toBe('month');
     expect(result.cursors).toEqual({});
@@ -133,6 +136,29 @@ describe('migratePersistedData', () => {
     expect(migratePersistedData(copiedState, identityB, NOW).cursors).toEqual({});
     expect(JSON.stringify(migratePersistedData(copiedState, identityA, NOW)))
       .not.toContain(TOKEN_A);
+  });
+});
+
+describe('isSafeFileNameTemplate', () => {
+  it.each([
+    '',
+    'History',
+    '../{period}',
+    'nested/{period}',
+    '{year}',
+    '{period}.',
+    ' {period}',
+    '{period} ',
+  ])('rejects unsafe template %s', (template) => {
+    expect(isSafeFileNameTemplate(template)).toBe(false);
+  });
+
+  it.each([
+    '{period}',
+    'Browser history - {period}',
+    '{period} - browsing',
+  ])('accepts portable period template %s', (template) => {
+    expect(isSafeFileNameTemplate(template)).toBe(true);
   });
 });
 

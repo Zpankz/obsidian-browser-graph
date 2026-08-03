@@ -1,8 +1,20 @@
 import esbuild from 'esbuild';
-import { readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
+import path from 'node:path';
 
 const isProduction = process.argv[2] === 'production';
+const buildDirectory = 'build';
+const releaseFiles = ['manifest.json', 'styles.css'];
+
+if (isProduction) {
+  await rm(buildDirectory, { recursive: true, force: true });
+  await rm('main.js', { force: true });
+}
+await mkdir(buildDirectory, { recursive: true });
+await Promise.all(releaseFiles.map((file) =>
+  copyFile(file, path.join(buildDirectory, file))));
+
 const nodeBuiltins = builtinModules.flatMap((moduleName) => [
   moduleName,
   `node:${moduleName}`,
@@ -34,13 +46,13 @@ const context = await esbuild.context({
   sourcemap: isProduction ? false : 'inline',
   treeShaking: true,
   plugins: [embeddedWasmPlugin],
-  outfile: 'main.js',
+  outfile: path.join(buildDirectory, 'main.js'),
 });
 
 if (isProduction) {
   await context.rebuild();
   await context.dispose();
-  await rm('sql-wasm.wasm', { force: true });
+  await rm(path.join(buildDirectory, 'sql-wasm.wasm'), { force: true });
 } else {
   await context.watch();
 }

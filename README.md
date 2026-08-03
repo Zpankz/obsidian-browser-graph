@@ -45,7 +45,7 @@ npm run build
 npm run test:release
 ```
 
-`npm test` is artifact-independent and succeeds before a build. `npm run test:release` runs only after the build and stages the exact three-file Community release in an isolated temporary directory for verification. Copy the same three release files listed above into `<vault>/.obsidian/plugins/browser-history-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin. The production `sql.js` WebAssembly bytes are embedded in generated `main.js` at build time.
+`npm test` is artifact-independent and succeeds before a build. `npm run build` writes the complete three-file plugin to `build/`, and `npm run test:release` stages that output in an isolated temporary directory for verification. Copy `build/main.js`, `build/manifest.json`, and `build/styles.css` into `<vault>/.obsidian/plugins/browser-history-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin. The production `sql.js` WebAssembly bytes are embedded in generated `build/main.js` at build time.
 
 ## Use
 
@@ -62,6 +62,7 @@ The settings page provides:
 
 - A toggle for Safari, Firefox, Google Chrome, Microsoft Edge, Brave, Chromium, and Vivaldi. Sources default to enabled; unavailable or undetected sources are skipped.
 - A vault-relative output folder with suggestions from existing vault folders. The default is `Browser History`. Absolute and drive-relative paths, parent traversal, `.obsidian` aliases, Windows reserved names/characters, and components with trailing dots or spaces are rejected on every platform.
+- A file name template containing `{period}`. The default is `{period}`; for example, `Browser history - {period}` produces `Browser history - 2026-08.md` for a monthly note. The `.md` extension is added automatically, and folders or unknown placeholders are rejected.
 - A **Flat** or **Tiered** layout. The default is **Tiered**.
 - A **Day**, **ISO week**, **Month**, or **Year** note period. The default is **Month**.
 - A read-only list of detected profiles and their availability or permission status.
@@ -141,4 +142,4 @@ npm run build
 npm run test:release
 ```
 
-Run the commands in that order: the default suite is intentionally independent of ignored build artifacts, while release verification requires a fresh build. Tests use synthetic database fixtures and in-memory vaults. They never inspect real browser history.
+Run the commands in that order: the default suite is intentionally independent of ignored build artifacts, while release verification requires a fresh `build/` directory. Tests use synthetic database fixtures and in-memory vaults. They never inspect real browser history.

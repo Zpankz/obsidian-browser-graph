@@ -121,6 +121,26 @@ it('imports every visit once and advances each successful profile cursor', async
   ).toHaveLength(2);
 });
 
+it('writes visits to the configured file name template', async () => {
+  const vault = fakeVault();
+  const state = persisted({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+      fileNameTemplate: 'Browser history - {period}',
+    },
+  });
+
+  const result = await runImport(
+    { data: state },
+    deps({ vault, visits: [normalized({ sourceVisitId: '1' })] }),
+  );
+
+  expect(result.imported).toBe(1);
+  expect(vault.readText('Browser History/2026/Browser history - 2026-08.md'))
+    .toContain('obsidian-browser-sync');
+});
+
 it('does not advance a cursor when one planned note write fails', async () => {
   const state = persisted();
   const vault = fakeVault({
