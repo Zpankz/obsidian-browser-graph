@@ -96,7 +96,7 @@ History/2025/2025-12/2026-W01.md
 History/2025/2025-12/2026-W01/2026-01-01.md
 ```
 
-Dates, times, and filenames use the local timezone of the Obsidian desktop environment at import time. Existing notes keep user-authored content; the plugin appends entries and never reformats or deletes that content.
+Dates, times, and filenames use the local timezone of the Obsidian desktop environment at import time. Every visit entry begins with a full local ISO timestamp such as `2026-08-03T09:14:32+03:00`, including the applicable UTC offset. Existing notes keep user-authored content; the plugin appends entries and never reformats or deletes that content.
 
 ## Idempotency and state
 

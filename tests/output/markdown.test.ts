@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import {
   extractImportedIds,
+  formatLocalIsoTimestamp,
   newNote,
   renderVisit,
   stableVisitId,
@@ -43,6 +44,42 @@ it('keeps browser and profile labels on the visit line', () => {
 
   expect(markdown).toContain('— Google Chrome # injected / Default # injected\n  <!--');
   expect(markdown).not.toContain('\n# injected');
+});
+
+it.each([
+  {
+    parts: [2026, 7, 3, 9, 14, 32, -180],
+    expected: '2026-08-03T09:14:32+03:00',
+  },
+  {
+    parts: [2026, 0, 9, 17, 5, 4, 300],
+    expected: '2026-01-09T17:05:04-05:00',
+  },
+  {
+    parts: [2026, 2, 8, 1, 2, 3, -330],
+    expected: '2026-03-08T01:02:03+05:30',
+  },
+])('formats a full local ISO timestamp as $expected', ({ parts, expected }) => {
+  const [year, month, day, hour, minute, second, timezoneOffset] = parts;
+  const localDate = {
+    getFullYear: () => year,
+    getMonth: () => month,
+    getDate: () => day,
+    getHours: () => hour,
+    getMinutes: () => minute,
+    getSeconds: () => second,
+    getTimezoneOffset: () => timezoneOffset,
+  } as Date;
+
+  expect(formatLocalIsoTimestamp(localDate)).toBe(expected);
+});
+
+it('renders the full local ISO timestamp on every visit entry', () => {
+  const input = visit({ visitedAt: new Date('2026-08-03T10:00:00Z') });
+
+  expect(renderVisit(input)).toMatch(
+    new RegExp(`^- ${formatLocalIsoTimestamp(input.visitedAt).replace(/[+]/g, '\\+')}`),
+  );
 });
 
 it('escapes raw HTML from titles and browser/profile labels', () => {

@@ -3,10 +3,17 @@ import type { NormalizedVisit } from '../domain';
 
 const MARKER_LINE = /^ {0,3}<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->[ ]*$/;
 
-function localTime(date: Date): string {
-  return [date.getHours(), date.getMinutes(), date.getSeconds()]
-    .map((part) => part.toString().padStart(2, '0'))
-    .join(':');
+export function formatLocalIsoTimestamp(date: Date): string {
+  const pad = (part: number, length = 2): string => part.toString().padStart(length, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absoluteOffset / 60);
+  const offsetRemainder = absoluteOffset % 60;
+
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    + `${offsetSign}${pad(offsetHours)}:${pad(offsetRemainder)}`;
 }
 
 function replaceControlCharacters(value: string, replacement: string): string {
@@ -117,7 +124,7 @@ export function renderVisit(visit: NormalizedVisit): string {
   const markerSource = visit.browserId;
   const browserName = safeLabel(visit.browserName);
   const profileName = safeLabel(visit.profileName);
-  return `- ${localTime(visit.visitedAt)} ${visibleVisit} — ${browserName} / ${profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
+  return `- ${formatLocalIsoTimestamp(visit.visitedAt)} ${visibleVisit} — ${browserName} / ${profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
 }
 
 export function extractImportedIds(markdown: string): Set<string> {
