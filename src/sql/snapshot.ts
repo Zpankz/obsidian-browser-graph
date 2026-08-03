@@ -10,6 +10,30 @@ export interface SnapshotFileSystem {
 
 const systemTempFiles: SnapshotFileSystem = { copyFile, mkdtemp, rm };
 
+export class SnapshotCleanupError extends Error {
+  readonly cause: unknown;
+  readonly cleanupError: unknown;
+  readonly operationError?: unknown;
+
+  constructor(
+    readonly temporaryDirectory: string,
+    cleanupError: unknown,
+    operationFailed: boolean,
+    operationError?: unknown,
+  ) {
+    const cleanupMessage = errorMessage(cleanupError);
+    super(operationFailed
+      ? `${errorMessage(operationError)}; cleanup also failed for sensitive temporary database snapshot ${temporaryDirectory}: ${cleanupMessage}. The snapshot may remain.`
+      : `Cleanup failed for sensitive temporary database snapshot ${temporaryDirectory}: ${cleanupMessage}. The snapshot may remain.`);
+    this.name = 'SnapshotCleanupError';
+    this.cause = operationFailed ? operationError : cleanupError;
+    this.cleanupError = cleanupError;
+    if (operationFailed) {
+      this.operationError = operationError;
+    }
+  }
+}
+
 export function withDatabaseSnapshot<T>(
   databasePath: string,
   operation: (snapshotPath: string) => Promise<T>,
@@ -33,11 +57,35 @@ export async function withDatabaseSnapshot<T>(
   const temporaryDirectory = await files.mkdtemp(
     path.join(tmpdir(), 'obsidian-browser-sync-'),
   );
+  let operationFailed = false;
+  let operationError: unknown;
+  let result: T | undefined;
   try {
     const snapshotPath = path.join(temporaryDirectory, path.basename(databasePath));
     await files.copyFile(databasePath, snapshotPath);
-    return await operation(snapshotPath);
-  } finally {
-    await files.rm(temporaryDirectory, { recursive: true, force: true });
+    result = await operation(snapshotPath);
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   }
+
+  try {
+    await files.rm(temporaryDirectory, { recursive: true, force: true });
+  } catch (cleanupError) {
+    throw new SnapshotCleanupError(
+      temporaryDirectory,
+      cleanupError,
+      operationFailed,
+      operationError,
+    );
+  }
+
+  if (operationFailed) {
+    throw operationError;
+  }
+  return result as T;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

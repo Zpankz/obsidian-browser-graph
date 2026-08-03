@@ -125,7 +125,7 @@ async function discoverFirefox(
     }
     return profile(
       browser,
-      iniProfile.path,
+      pathApi.basename(pathApi.normalize(iniProfile.path)),
       iniProfile.name || iniProfile.path,
       databasePath,
       pathApi,

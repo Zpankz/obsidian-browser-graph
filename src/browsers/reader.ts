@@ -2,6 +2,8 @@ import type { BrowserProfile, NormalizedVisit, ProfileCursor } from '../domain';
 import type { SqliteDatabase } from '../sql/sqlite';
 
 export const CURSOR_OVERLAP_MS = 120_000;
+export const MAX_FUTURE_SKEW_MS = 24 * 60 * 60_000;
+const MAX_DATE_MS = 8_640_000_000_000_000;
 
 export interface BrowserHistoryReader {
   read(
@@ -37,7 +39,12 @@ export function normalizeVisit(
   visitedAtMs: number,
   title: unknown,
   url: unknown,
-): NormalizedVisit {
+  nowMs = Date.now(),
+): NormalizedVisit | undefined {
+  if (!isSafeVisitTimestamp(visitedAtMs, nowMs)) {
+    return undefined;
+  }
+  const normalizedTimestamp = new Date(visitedAtMs).getTime();
   return {
     sourceKey: profile.sourceKey,
     sourceVisitId: String(sourceVisitId),
@@ -45,10 +52,28 @@ export function normalizeVisit(
     browserName: profile.browserName,
     profileId: profile.profileId,
     profileName: profile.profileName,
-    visitedAt: new Date(visitedAtMs),
+    visitedAt: new Date(normalizedTimestamp),
     title: typeof title === 'string' ? title : '',
     url: typeof url === 'string' ? url : String(url ?? ''),
   };
+}
+
+export function isSafeVisitTimestamp(
+  value: unknown,
+  nowMs = Date.now(),
+): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= MAX_DATE_MS
+    && Number.isFinite(new Date(value).getTime())
+    && value <= nowMs + MAX_FUTURE_SKEW_MS;
+}
+
+export function presentVisits(
+  visits: Array<NormalizedVisit | undefined>,
+): NormalizedVisit[] {
+  return visits.filter((visit): visit is NormalizedVisit => visit !== undefined);
 }
 
 export function sortVisits(visits: NormalizedVisit[]): NormalizedVisit[] {

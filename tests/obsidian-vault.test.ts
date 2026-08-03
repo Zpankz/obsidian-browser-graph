@@ -29,6 +29,7 @@ interface FakeObsidianVault extends Pick<
   | 'create'
   | 'read'
   | 'append'
+  | 'getMarkdownFiles'
 > {
   createdFolders: string[];
   createdFiles: Array<{ path: string; content: string }>;
@@ -49,6 +50,12 @@ function fakeObsidianVault(): FakeObsidianVault {
     contents,
     getAbstractFileByPath(path) {
       return files.get(path) ?? null;
+    },
+    getMarkdownFiles() {
+      return [...files.values()].filter(
+        (file): file is TFile => file instanceof TFile
+          && file.path.toLowerCase().endsWith('.md'),
+      );
     },
     async createFolder(path) {
       if (api.raceFolder === path) {
@@ -114,6 +121,26 @@ describe('ObsidianVaultPort', () => {
     }]);
   });
 
+  it('scans only Markdown files without rejecting trusted unsafe legacy filenames', async () => {
+    api.files.set('History/one.md', new TFile('History/one.md'));
+    api.files.set('History/two.MD', new TFile('History/two.MD'));
+    api.files.set('History/export.txt', new TFile('History/export.txt'));
+    api.files.set('CON.md', new TFile('CON.md'));
+    api.files.set('History', new TFolder('History'));
+    api.contents.set('History/one.md', 'one');
+    api.contents.set('History/two.MD', 'two');
+    api.contents.set('History/export.txt', 'not Markdown');
+    api.contents.set('CON.md', 'legacy marker note');
+
+    const markdown: string[] = [];
+    await vault.scanMarkdownFiles((content) => markdown.push(content));
+    expect(markdown).toEqual([
+      'legacy marker note',
+      'one',
+      'two',
+    ]);
+  });
+
   it('rechecks after a concurrent folder creator wins the race', async () => {
     api.raceFolder = 'Browser History/2026';
 
@@ -138,6 +165,25 @@ describe('ObsidianVaultPort', () => {
     'Browser History/../../outside.md',
     '/absolute/history.md',
     'C:\\absolute\\history.md',
+    'C:relative\\history.md',
+    'Browser History.',
+    'Browser History ',
+    'History/<private>.md',
+    'History/bad\u0001name.md',
+    'History/bad\u007fname.md',
+    'CON',
+    'con.md',
+    'AUX.log',
+    'PRN',
+    'NUL.md',
+    'COM1.history',
+    'LPT9.txt',
+    'COM¹',
+    'com².log',
+    'LPT³.txt',
+    '.obsidian.',
+    '.obsidian ',
+    '.obsidian./plugins/history.md',
   ])('refuses unsafe vault path %s', async (path) => {
     await expect(vault.exists(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.ensureFolder(path)).rejects.toThrow('Unsafe vault path');

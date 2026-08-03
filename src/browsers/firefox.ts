@@ -4,6 +4,7 @@ import {
   CURSOR_OVERLAP_MS,
   type BrowserHistoryReader,
   normalizeVisit,
+  presentVisits,
   sortVisits,
   validateSchema,
 } from './reader';
@@ -12,10 +13,12 @@ interface FirefoxVisitRow extends Record<string, unknown> {
   sourceVisitId: number | string;
   title: string | null;
   url: string;
-  visitDate: number;
+  visitDate: unknown;
 }
 
 export class FirefoxReader implements BrowserHistoryReader {
+  constructor(private readonly now: () => number = Date.now) {}
+
   read(
     db: SqliteDatabase,
     profile: BrowserProfile,
@@ -36,15 +39,23 @@ export class FirefoxReader implements BrowserHistoryReader {
              moz_places.url AS url
       FROM moz_historyvisits
       INNER JOIN moz_places ON moz_places.id = moz_historyvisits.place_id
-      ${since === undefined ? '' : 'WHERE moz_historyvisits.visit_date >= :since'}
-    `, since === undefined ? undefined : { ':since': since });
+      ${since === undefined ? '' : `WHERE (
+        moz_historyvisits.visit_date >= :since
+        OR moz_historyvisits.id > CAST(:sourceVisitId AS INTEGER)
+      )`}
+      ORDER BY moz_historyvisits.visit_date ASC, moz_historyvisits.id ASC
+    `, since === undefined ? undefined : {
+      ':since': since,
+      ':sourceVisitId': cursor?.sourceVisitId ?? '0',
+    });
 
-    return sortVisits(rows.map((row) => normalizeVisit(
+    return sortVisits(presentVisits(rows.map((row) => normalizeVisit(
       profile,
       row.sourceVisitId,
-      Number(row.visitDate) / 1_000,
+      typeof row.visitDate === 'number' ? row.visitDate / 1_000 : Number.NaN,
       row.title,
       row.url,
-    )));
+      this.now(),
+    ))));
   }
 }

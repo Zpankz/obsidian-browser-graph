@@ -4,6 +4,7 @@ import {
   CURSOR_OVERLAP_MS,
   type BrowserHistoryReader,
   normalizeVisit,
+  presentVisits,
   sortVisits,
   validateSchema,
 } from './reader';
@@ -14,10 +15,12 @@ interface SafariVisitRow extends Record<string, unknown> {
   sourceVisitId: number | string;
   title: string | null;
   url: string;
-  visitTime: number;
+  visitTime: unknown;
 }
 
 export class SafariReader implements BrowserHistoryReader {
+  constructor(private readonly now: () => number = Date.now) {}
+
   read(
     db: SqliteDatabase,
     profile: BrowserProfile,
@@ -38,15 +41,25 @@ export class SafariReader implements BrowserHistoryReader {
              history_items.url AS url
       FROM history_visits
       INNER JOIN history_items ON history_items.id = history_visits.history_item
-      ${since === undefined ? '' : 'WHERE history_visits.visit_time >= :since'}
-    `, since === undefined ? undefined : { ':since': since });
+      ${since === undefined ? '' : `WHERE (
+        history_visits.visit_time >= :since
+        OR history_visits.id > CAST(:sourceVisitId AS INTEGER)
+      )`}
+      ORDER BY history_visits.visit_time ASC, history_visits.id ASC
+    `, since === undefined ? undefined : {
+      ':since': since,
+      ':sourceVisitId': cursor?.sourceVisitId ?? '0',
+    });
 
-    return sortVisits(rows.map((row) => normalizeVisit(
+    return sortVisits(presentVisits(rows.map((row) => normalizeVisit(
       profile,
       row.sourceVisitId,
-      (Number(row.visitTime) + SAFARI_EPOCH_OFFSET_SECONDS) * 1_000,
+      typeof row.visitTime === 'number'
+        ? (row.visitTime + SAFARI_EPOCH_OFFSET_SECONDS) * 1_000
+        : Number.NaN,
       row.title,
       row.url,
-    )));
+      this.now(),
+    ))));
   }
 }

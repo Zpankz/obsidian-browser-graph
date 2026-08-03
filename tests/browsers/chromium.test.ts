@@ -73,6 +73,50 @@ describe('ChromiumReader', () => {
     db.close();
   });
 
+  it('recovers a higher visit ID even when its corrected timestamp predates the overlap', async () => {
+    const db = await chromiumFixture([
+      { id: 6, urlId: 1, visitTime: chromiumMicros('2026-08-03T09:00:00Z') },
+      { id: 8, urlId: 1, visitTime: chromiumMicros('2026-08-03T09:00:00Z') },
+    ]);
+
+    const visits = new ChromiumReader().read(db, chromeProfile(), {
+      visitedAtMs: Date.parse('2026-08-03T10:05:00Z'),
+      sourceVisitId: '7',
+    });
+
+    expect(visits.map((item) => item.sourceVisitId)).toEqual(['8']);
+    db.close();
+  });
+
+  it('skips corrupt timestamps without discarding healthy rows', async () => {
+    const now = Date.parse('2026-08-03T12:00:00Z');
+    const db = await chromiumFixture([
+      { id: 1, urlId: 1, visitTime: CHROMIUM_EPOCH_OFFSET_MICROS - 1_000 },
+      { id: 2, urlId: 1, visitTime: chromiumMicros('2030-01-01T00:00:00Z') },
+      { id: 3, urlId: 1, visitTime: chromiumMicros('2026-08-03T10:00:00Z') },
+    ]);
+
+    expect(new ChromiumReader(() => now).read(db, chromeProfile())
+      .map((item) => item.sourceVisitId)).toEqual(['3']);
+    db.close();
+  });
+
+  it('keeps valid microseconds below Date precision and rejects NULL timestamps', async () => {
+    const db = await sqliteFixture([
+      'CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT)',
+      'CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER, visit_time)',
+      "INSERT INTO urls VALUES (1, 'https://example.com', 'Example')",
+    ]);
+    db.run('INSERT INTO visits VALUES (1, 1, :time)', {
+      ':time': chromiumMicros('2026-08-03T10:00:00Z') + 123,
+    });
+    db.run('INSERT INTO visits VALUES (2, 1, NULL)');
+
+    expect(new ChromiumReader(() => Date.parse('2026-08-04T00:00:00Z'))
+      .read(db, chromeProfile()).map((item) => item.sourceVisitId)).toEqual(['1']);
+    db.close();
+  });
+
   it('rejects a missing required column with a clear schema error', async () => {
     const db = await sqliteFixture([
       'CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)',

@@ -1,5 +1,6 @@
-import { TFile, TFolder, normalizePath, type Vault } from 'obsidian';
+import { TFile, TFolder, type Vault } from 'obsidian';
 import type { VaultPort } from './domain';
+import { normalizeSafeVaultPath } from './vault-path';
 
 export class ObsidianVaultPort implements VaultPort {
   constructor(private readonly vault: Vault) {}
@@ -43,6 +44,14 @@ export class ObsidianVaultPort implements VaultPort {
     }
   }
 
+  async scanMarkdownFiles(visit: (markdown: string) => void): Promise<void> {
+    const files = this.vault.getMarkdownFiles()
+      .sort((left, right) => left.path.localeCompare(right.path));
+    for (const file of files) {
+      visit(await this.vault.read(file));
+    }
+  }
+
   private fileAt(path: string): TFile {
     const normalized = safeVaultPath(path);
     const file = this.vault.getAbstractFileByPath(normalized);
@@ -54,18 +63,8 @@ export class ObsidianVaultPort implements VaultPort {
 }
 
 function safeVaultPath(value: string): string {
-  const candidate = value.trim().replace(/\\/g, '/');
-  if (
-    candidate.length === 0
-    || /^(?:\/|[A-Za-z]:\/)/.test(candidate)
-    || candidate.split('/').some((part) => part === '..')
-  ) {
-    throw new Error(`Unsafe vault path: ${value}`);
-  }
-
-  const normalized = normalizePath(candidate);
-  const firstSegment = normalized.split('/')[0];
-  if (!normalized || firstSegment.toLowerCase() === '.obsidian') {
+  const normalized = normalizeSafeVaultPath(value);
+  if (normalized === null) {
     throw new Error(`Unsafe vault path: ${value}`);
   }
   return normalized;

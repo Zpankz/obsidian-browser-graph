@@ -2,7 +2,7 @@
 
 ## Summary
 
-`obsidian-browser-sync` is a desktop-only Obsidian community plugin that imports local browser visit history into Markdown notes. Imports run only when the user invokes an Obsidian command. The plugin supports macOS, Windows, and Linux, provides first-class adapters for Safari, Firefox, and Chrome, and discovers compatible Chromium-family browsers such as Edge, Brave, Chromium, and Vivaldi.
+Browser Sync is a desktop-only Obsidian Community plugin with stable plugin ID `browser-history-sync` (the repository/package name remains `obsidian-browser-sync`). It imports local browser visit history into Markdown notes only when the user invokes an Obsidian command. The plugin supports macOS, Windows, and Linux, provides first-class adapters for Safari, Firefox, and Chrome, and discovers compatible Chromium-family browsers such as Edge, Brave, Chromium, and Vivaldi.
 
 Every detected profile of an enabled browser is imported. Each individual visit is retained, including repeated visits to the same URL. Repeated command runs are idempotent: after the initial import, only newer and not-yet-written visits extend the output notes.
 
@@ -34,9 +34,8 @@ The release contains:
 - `main.js`
 - `manifest.json`
 - `styles.css`
-- `sql-wasm.wasm`
 
-The production `sql.js` WebAssembly binary is approximately 660 kB uncompressed. It lives only in `.obsidian/plugins/obsidian-browser-sync/` and is never copied into the configured history output folder. Generated history remains ordinary Markdown.
+These are the complete Community installation artifacts under `.obsidian/plugins/browser-history-sync/`. The production `sql.js` WebAssembly bytes are embedded in generated `main.js` at build time, so installation has no separate WASM sidecar. The root manifest declares author `git-akihakune`, the MIT-licensed package metadata, Obsidian 1.13.0 minimum, and desktop-only support. Generated history remains ordinary Markdown.
 
 ## Architecture
 
@@ -53,11 +52,11 @@ Discovery adapters receive an explicit platform and home-directory abstraction s
 - Chrome: discover all Chrome profiles on each supported platform.
 - Chromium-compatible browsers: discover known data roots for Edge, Brave, Chromium, and Vivaldi, then use the Chrome reader when their database schema is compatible.
 
-Each discovered profile has a stable key derived from browser identifier and canonical profile location. Display names are used only in Markdown and settings UI, not for identity.
+Each discovered profile has a local cursor key derived from browser identifier and canonical profile location. It also carries a portable profile ID, such as the Chromium profile directory or Firefox profile-directory basename, for path-independent Markdown visit identity. Display names are used only in Markdown and settings UI.
 
 ### Snapshot and SQLite access
 
-Browser databases are opened read-only through bundled `sql.js`. Before querying, the plugin copies the database into an operating-system temporary directory so it does not contend with the browser's lock. Temporary copies are removed in a `finally` cleanup path.
+Browser databases are opened read-only through bundled `sql.js`, initialized directly from the WASM bytes embedded in `main.js`. Before querying, the plugin copies the database into an operating-system temporary directory so it does not contend with the browser's lock. Temporary copies are removed after each operation. If both the database operation and cleanup fail, one combined error retains the operation failure as primary and preserves the cleanup failure; cleanup-only failures explicitly warn that a sensitive snapshot may remain.
 
 Because `sql.js` loads a database snapshot into memory and does not consume a separate live write-ahead log, a very recent visit that has not reached the main database may be absent from the current run. The saved cursor includes a conservative overlap window, so a later run can pick it up without duplication.
 
@@ -79,32 +78,32 @@ interface NormalizedVisit {
 }
 ```
 
-Timestamp conversion is explicit per schema: Chromium's epoch, Firefox's Unix-microsecond values, and Safari's Core Data reference date. Readers preserve separate visit rows and do not collapse repeated URLs.
+Timestamp conversion is explicit per schema: Chromium's epoch, Firefox's Unix-microsecond values, and Safari's Core Data reference date. Each reader rejects non-finite, unrepresentable, negative, and implausibly future timestamps before normalized visits escape its profile boundary. Readers preserve separate visit rows and do not collapse repeated URLs. Cursor queries use both the timestamp overlap and a monotonic source-visit-ID predicate, with deterministic bound parameters and native timestamp/ID ordering, so a corrected future clock cannot permanently hide later higher-ID visits.
 
 ### Stable visit identity
 
-Every normalized visit receives a deterministic ID generated from its browser ID, stable profile ID, source visit ID, timestamp, and URL. The ID is encoded in a hidden Markdown comment following the visible entry. Source IDs alone are not assumed globally unique.
+Every normalized visit receives a deterministic ID generated from portable browser ID, portable profile ID, source visit ID, timestamp, and URL fields. It never includes the local canonical profile path, cursor source key, device token, or device hash. The ID is encoded in a hidden Markdown comment following the visible entry. Source IDs alone are not assumed globally unique.
 
 ```markdown
 - 14:32:08 [Page title](https://example.com) — Chrome · Personal
   <!-- obsidian-browser-sync:chrome:stable-id -->
 ```
 
-Titles and URLs are escaped so a browser record cannot break the Markdown structure or inject an Obsidian command. Empty titles fall back to the URL.
+Titles, browser names, and profile labels are escaped for Markdown and raw HTML. Only `http:` and `https:` URLs are clickable; `obsidian:`, `javascript:`, `file:`, other schemes, and malformed URLs are inert text while the visit and hidden ID remain. Empty titles fall back to the URL. Marker parsing accepts only exact standalone managed-marker lines, preventing marker-shaped label text from becoming imported state. The historical `obsidian-browser-sync` marker namespace remains unchanged for compatibility with existing notes.
 
 ## Import Data Flow
 
 When the user invokes the import command, the plugin performs these steps:
 
 1. Reject a second invocation if an import is already running.
-2. Validate the vault-relative output folder and create it if necessary.
+2. Snapshot all settings immutably, validate the vault-relative output folder, and create it if necessary.
 3. Discover all profiles for enabled browser sources.
-4. For each profile, create a temporary database snapshot and query visits after that profile's cursor minus the overlap window.
-5. Normalize visits, create stable IDs, and sort chronologically with stable IDs as the tie-breaker.
-6. Group visits by configured note period and calculate each destination path.
-7. Read each existing destination note and collect its hidden imported IDs.
-8. Append only entries whose stable IDs are absent.
-9. After every note write for a profile succeeds, persist that profile's new high-water timestamp and source visit tie-breaker.
+4. Index exact managed markers across every Markdown file in the vault, excluding non-Markdown files.
+5. For each profile, create a temporary database snapshot and query visits after that profile's cursor minus the overlap window or with a higher source visit ID.
+6. Validate and normalize visits, create stable IDs, and sort chronologically with stable IDs as the tie-breaker.
+7. Group visits using the command-time settings snapshot and calculate each destination path.
+8. Append only entries whose stable IDs are absent from the vault-wide marker index.
+9. After every note write for a profile succeeds, persist independently monotonic timestamp and source-ID high-water fields.
 10. Remove temporary snapshots and show imported, skipped, and failed counts.
 
 Profiles may be processed independently, but writes to the same note are serialized so two profiles cannot overwrite each other's additions.
@@ -113,14 +112,14 @@ Profiles may be processed independently, but writes to the same note are seriali
 
 Idempotency uses two layers:
 
-1. A high-water cursor per stable browser profile limits later database queries. A conservative overlap ensures timestamp ties, late database checkpoints, and partially observed history are queried again.
-2. Hidden stable IDs in Markdown are the final deduplication authority. They make a retry safe even when a prior run wrote notes but failed before saving its cursor.
+1. A high-water cursor per local browser profile limits later database queries. A conservative timestamp overlap plus an independent source-ID high-water predicate covers timestamp ties, clock correction, late database checkpoints, and partially observed history.
+2. Vault-wide hidden stable IDs in Markdown are the final deduplication authority. They make a retry safe even when a prior run wrote notes but failed before saving its cursor, and remain authoritative after output folder, layout, period, timezone, or local profile-path changes.
 
 A profile cursor advances only after all note writes planned for that profile succeed. Failure leaves that cursor unchanged. On the next run, overlapping visits are re-queried and suppressed by their existing Markdown IDs.
 
-If plugin state is deleted, copied from another machine, or excluded from Git, the plugin queries history from the beginning but reconstructs deduplication from destination note markers. This can make the first recovery run slower but does not duplicate existing marked entries.
+If plugin state is deleted, copied from another device, or excluded from Git, the plugin queries history from the beginning but reconstructs deduplication from managed markers across the vault. This can make the first recovery run slower but does not duplicate existing marked entries or rewrite user content.
 
-Cursor state is machine-specific and stored in the plugin's `data.json` alongside settings. The format uses a version number so later releases can migrate it. Missing and legacy fields receive explicit defaults.
+Cursor state is device-specific and stored in version 3 of the plugin's `data.json` alongside settings. Production generates a random per-device token and persists the raw token outside the synced vault in Obsidian/Electron local storage under a plugin-specific key. Only its SHA-256 hash is stored in `data.json`. A missing/cleared local token, legacy version, invalid persisted cursor timestamp, or hash mismatch invalidates cursors and safely triggers a rescan. Devices with identical platform/hostname/home values still receive distinct identities.
 
 ## Output Model
 
@@ -172,7 +171,7 @@ The settings tab provides:
 - A note-period selector: day, ISO week, month, or year.
 - A read-only list of detected browser profiles and permission status.
 
-Safari, Firefox, and Chrome are enabled by default when supported by the current operating system. Compatible Chromium browsers are enabled when detected. Settings changes apply to the next manual run.
+Safari, Firefox, and Chrome are enabled by default when supported by the current operating system. Compatible Chromium browsers are enabled when detected. The output input uses an Obsidian-compatible folder suggestion component, filtered through the same portable path validator as persistence and vault writes. Each command snapshots browser toggles, output folder, layout, and period before any asynchronous discovery or folder preparation; settings changes during an import apply only to the next manual run.
 
 The plugin registers one command named `Import browser history`. There is no ribbon action, startup import, timer, or background watcher in the initial release.
 
@@ -181,8 +180,8 @@ The plugin registers one command named `Import browser history`. There is no rib
 - All processing remains local; the plugin performs no network requests.
 - Browser databases are read only and never modified.
 - Temporary snapshots use the operating system's temporary directory and are removed after each profile attempt.
-- Output paths must be normalized vault-relative paths. Absolute paths, parent traversal, and `.obsidian` destinations are rejected.
-- Browser-derived text is treated as untrusted and escaped before insertion into Markdown.
+- Output paths must be normalized vault-relative paths. On every host the settings and vault-adapter boundaries reject absolute and drive-relative paths, parent traversal, ASCII control/Windows reserved characters, trailing dots/spaces, reserved device components (including names with extensions), and `.obsidian` aliases.
+- Browser-derived titles, browser/profile labels, and inert URL text are treated as untrusted and escaped before insertion into Markdown. Only HTTP(S) URLs are linked.
 - Logs and notices avoid printing full visited URLs unless needed for a user-visible source error.
 - On macOS, Safari history access may require Full Disk Access for Obsidian. Permission-denied errors explain the required user action without attempting to change system permissions.
 
@@ -209,21 +208,24 @@ Vitest unit and integration tests use small, synthetic fixture databases and an 
 Coverage includes:
 
 - Chromium, Firefox, and Safari schema mapping and timestamp conversion.
+- Corrupt timestamp filtering and timestamp-or-higher-ID recovery in all three reader schemas.
 - First-class browser and compatible Chromium discovery across injected macOS, Windows, and Linux paths.
 - Discovery and import of all profiles.
 - Preservation of repeated visits to the same URL.
 - Deterministic stable visit IDs.
-- First import, repeated import, overlapping cursor query, interrupted write retry, and deleted-state recovery.
+- First import, repeated import, overlapping cursor query, future-clock correction, interrupted write retry, and vault-wide deleted-state recovery across settings/path/timezone changes.
 - Cursor advancement only after all planned writes for a profile succeed.
 - Day, ISO-week, month, and year grouping.
 - Flat paths and every tiered path shape, including ISO weeks that cross month and year boundaries.
 - Stable chronological ordering and timestamp ties.
-- Markdown escaping, empty titles, and unsafe output-folder rejection.
+- Raw-HTML/active-URI/marker-injection escaping, empty titles, and cross-host unsafe output-folder rejection at both validation boundaries.
 - Browser-not-found, permission-denied, corrupt database, changed-schema, and partial-run failures.
-- Settings defaults, serialization, and migration.
+- Version-3 settings defaults, durable device identity, cursor rejection, serialization, and migration.
+- Immutable command-time settings and project-owned folder suggestion behavior.
+- Primary-plus-cleanup and cleanup-only snapshot failures.
 - Prevention of overlapping command runs.
 
-Build verification confirms that the release contains the manifest, bundled JavaScript, stylesheet, and the production WASM asset and that the manifest declares desktop-only support.
+Build verification stages only `main.js`, `manifest.json`, and `styles.css`, loads the bundle without source dependencies or a WASM sidecar, opens a synthetic real SQLite database using embedded WASM, and confirms the Community manifest metadata and desktop-only support.
 
 ## Acceptance Criteria
 
@@ -234,7 +236,9 @@ Build verification confirms that the release contains the manifest, bundled Java
 - Each persisted browser visit becomes one Markdown entry, including repeated URLs.
 - The default output is a tiered monthly note such as `Browser History/2026/2026-08.md`.
 - Running the command twice without new history adds no duplicate entries.
+- Moving an already-marked visit across device paths or changing output folder, layout, period, or timezone adds no duplicate entry.
 - Newer visits extend only the appropriate existing or new notes.
 - A failed note write does not advance the affected profile cursor, and a retry does not duplicate already-written marked entries.
-- Browser databases are not modified, no network requests occur, and temporary snapshots are cleaned up.
+- Browser databases are not modified, no network requests occur, and temporary snapshots are cleaned up or their cleanup failures are preserved and reported.
+- Community installation requires exactly `main.js`, `manifest.json`, and optional `styles.css`; SQL WebAssembly is embedded in `main.js`.
 - Automated tests and the production build pass on the supported development toolchain.

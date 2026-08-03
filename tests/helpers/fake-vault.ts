@@ -43,6 +43,15 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
       files.set(path, current + content);
     },
     async ensureFolder() {},
+    async scanMarkdownFiles(visit) {
+      const contents = [...files.entries()]
+        .filter(([path]) => path.toLowerCase().endsWith('.md'))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([, content]) => content);
+      for (const content of contents) {
+        visit(content);
+      }
+    },
     readText(path) {
       const content = files.get(path);
       if (content === undefined) {

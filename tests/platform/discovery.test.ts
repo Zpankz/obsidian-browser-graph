@@ -97,6 +97,7 @@ describe('discoverProfiles', () => {
 
     expect(await discoverProfiles(context({ fs }))).toContainEqual(expect.objectContaining({
       profileName: 'Work',
+      profileId: 'work',
       databasePath: '/mnt/profiles/work/places.sqlite',
     }));
   });

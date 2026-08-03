@@ -1,9 +1,7 @@
 import { access, readFile, readdir } from 'node:fs/promises';
 import { constants as fileSystemConstants } from 'node:fs';
-import { homedir, hostname } from 'node:os';
-import path from 'node:path';
+import { homedir } from 'node:os';
 import {
-  FileSystemAdapter,
   Notice,
   Plugin,
 } from 'obsidian';
@@ -20,6 +18,10 @@ import type {
   ProfileCursor,
   VaultPort,
 } from './domain';
+import {
+  LocalStorageDeviceIdentityPort,
+  type DeviceIdentityPort,
+} from './device-identity';
 import { ObsidianVaultPort } from './obsidian-vault';
 import { BROWSER_CATALOG, type DiscoveryPlatform } from './platform/catalog';
 import { discoverProfiles, type FileSystemPort } from './platform/discovery';
@@ -30,9 +32,9 @@ import {
 } from './settings-tab';
 import {
   DEFAULT_SETTINGS,
-  deriveMachineNamespace,
   isSafeVaultFolder,
   migratePersistedData,
+  resolveDeviceIdentity,
 } from './settings';
 import { createSqliteFactory, type SqliteFactory } from './sql/sqlite';
 import { withDatabaseSnapshot } from './sql/snapshot';
@@ -45,7 +47,7 @@ import {
 
 export interface BrowserSyncRuntime {
   platform: DiscoveryPlatform;
-  machineNamespace: string;
+  deviceIdentity: DeviceIdentityPort;
   vault: VaultPort;
   discover: ImportDependencies['discover'];
   readVisits: ImportDependencies['readVisits'];
@@ -58,8 +60,8 @@ export interface BrowserSyncRuntime {
 }
 
 const initialData = (): PersistedData => ({
-  version: 2,
-  machineNamespace: '',
+  version: 3,
+  deviceIdentityHash: '',
   settings: {
     ...DEFAULT_SETTINGS,
     enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
@@ -80,9 +82,10 @@ export default class BrowserSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const runtime = this.createRuntime();
+    const deviceIdentityHash = resolveDeviceIdentity(runtime.deviceIdentity);
     const loaded = migratePersistedData(
       await this.loadData(),
-      runtime.machineNamespace,
+      deviceIdentityHash,
     );
     this.data = clonePersistedData(loaded);
     this.committedData = clonePersistedData(loaded);
@@ -109,11 +112,11 @@ export default class BrowserSyncPlugin extends Plugin {
     return this.enqueuePersistence(async () => {
       const composed = applySettingsPatch(this.committedData.settings, patch);
       const normalized = migratePersistedData({
-        version: 2,
-        machineNamespace: this.committedData.machineNamespace,
+        version: 3,
+        deviceIdentityHash: this.committedData.deviceIdentityHash,
         settings: composed,
         cursors: this.committedData.cursors,
-      }, this.committedData.machineNamespace).settings;
+      }, this.committedData.deviceIdentityHash).settings;
       if (!validSettings(normalized)) {
         throw new Error('Browser Sync settings changed to an unsupported value.');
       }
@@ -138,7 +141,8 @@ export default class BrowserSyncPlugin extends Plugin {
 
   async importBrowserHistory(): Promise<void> {
     const runtime = this.requireRuntime();
-    if (!validSettings(this.data.settings)) {
+    const settings = cloneSettings(this.data.settings);
+    if (!validSettings(settings)) {
       runtime.notice(
         'Browser history import could not start. Choose a valid vault-relative output folder in Browser Sync settings.',
       );
@@ -146,9 +150,9 @@ export default class BrowserSyncPlugin extends Plugin {
     }
 
     try {
-      await runtime.vault.ensureFolder(this.data.settings.outputFolder);
+      await runtime.vault.ensureFolder(settings.outputFolder);
       const summary = await runtime.runImporter(
-        { data: this.data },
+        { data: this.data, settings },
         {
           discover: runtime.discover,
           readVisits: runtime.readVisits,
@@ -167,6 +171,11 @@ export default class BrowserSyncPlugin extends Plugin {
         );
       }
       if (summary.failedProfiles.length > 0) {
+        if (hasSnapshotCleanupFailure(summary)) {
+          runtime.notice(
+            'A sensitive temporary database snapshot may remain because cleanup failed. Remove it from the system temporary folder before retrying.',
+          );
+        }
         runtime.notice(
           'Some browser profiles failed. Close the affected browsers and try again; if the problem continues, check for a Browser Sync update.',
         );
@@ -196,14 +205,10 @@ export default class BrowserSyncPlugin extends Plugin {
     const homeDir = homedir();
     const permissionDeniedPaths = new Set<string>();
     const fs = nodeFileSystem(permissionDeniedPaths);
-    const sqlite = createSqliteFactory(installedPluginDirectory(this));
+    const sqlite = createSqliteFactory();
     return {
       platform,
-      machineNamespace: deriveMachineNamespace({
-        platform,
-        hostname: hostname(),
-        homeDir,
-      }),
+      deviceIdentity: new LocalStorageDeviceIdentityPort(window.localStorage),
       vault: new ObsidianVaultPort(this.app.vault),
       discover: () => discoverProfiles({
         platform,
@@ -256,8 +261,8 @@ export default class BrowserSyncPlugin extends Plugin {
   private persistCursorData(data: PersistedData): Promise<void> {
     return this.enqueuePersistence(async () => {
       const snapshot = clonePersistedData({
-        version: 2,
-        machineNamespace: this.committedData.machineNamespace,
+        version: 3,
+        deviceIdentityHash: this.committedData.deviceIdentityHash,
         settings: this.committedData.settings,
         cursors: data.cursors,
       });
@@ -328,19 +333,6 @@ function nodeFileSystem(permissionDeniedPaths: Set<string>): FileSystemPort {
   };
 }
 
-function installedPluginDirectory(plugin: BrowserSyncPlugin): string {
-  const adapter = plugin.app.vault.adapter;
-  if (!(adapter instanceof FileSystemAdapter)) {
-    throw new Error('Browser Sync requires Obsidian desktop file access');
-  }
-  return path.join(
-    adapter.getBasePath(),
-    plugin.app.vault.configDir,
-    'plugins',
-    plugin.manifest.id,
-  );
-}
-
 function currentPlatform(): DiscoveryPlatform {
   if (process.platform === 'darwin' || process.platform === 'win32') {
     return process.platform;
@@ -366,8 +358,8 @@ function cloneSettings(settings: PluginSettings): PluginSettings {
 
 function clonePersistedData(data: PersistedData): PersistedData {
   return {
-    version: 2,
-    machineNamespace: data.machineNamespace,
+    version: 3,
+    deviceIdentityHash: data.deviceIdentityHash,
     settings: cloneSettings(data.settings),
     cursors: Object.fromEntries(
       Object.entries(data.cursors).map(([sourceKey, cursor]) => [
@@ -440,6 +432,11 @@ function hasSafariPermissionDenial(
   );
 }
 
+function hasSnapshotCleanupFailure(summary: ImportSummary): boolean {
+  return summary.failedProfiles.some(({ message }) =>
+    /sensitive temporary database snapshot[\s\S]*may remain/i.test(message));
+}
+
 function isPermissionDenial(error: unknown): boolean {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     const code = String(error.code).toUpperCase();
@@ -491,6 +488,9 @@ function failureCategory(error: unknown): string {
   }
   if (/locked|busy/i.test(message)) {
     return 'database-busy';
+  }
+  if (/sensitive temporary database snapshot|cleanup/i.test(message)) {
+    return 'snapshot-cleanup';
   }
   if (/vault|folder|file|write|append/i.test(message)) {
     return 'vault-io';

@@ -45,6 +45,66 @@ it('keeps browser and profile labels on the visit line', () => {
   expect(markdown).not.toContain('\n# injected');
 });
 
+it('escapes raw HTML from titles and browser/profile labels', () => {
+  const markdown = renderVisit(visit({
+    title: '<img src=x onerror="alert(1)"> & history',
+    browserName: '<script>alert(2)</script>',
+    profileName: 'Work & <admin>',
+  }));
+
+  expect(markdown).toContain(
+    '&lt;img src=x onerror=&quot;alert\\(1\\)&quot;&gt; &amp; history',
+  );
+  expect(markdown).toContain(
+    '— &lt;script&gt;alert\\(2\\)&lt;/script&gt; / Work &amp; &lt;admin&gt;',
+  );
+  expect(markdown).not.toContain('<img');
+  expect(markdown).not.toContain('<script>');
+});
+
+it('escapes active Markdown from titles and browser/profile labels', () => {
+  const markdown = renderVisit(visit({
+    title: '![[private-note]]',
+    browserName: '[Open vault](obsidian://open?vault=Private)',
+    profileName: '`code` ![[embedded-secret]]',
+  }));
+
+  expect(markdown).not.toContain('![[private-note]]');
+  expect(markdown).not.toContain('[Open vault](obsidian:');
+  expect(markdown).not.toContain('![[embedded-secret]]');
+  expect(markdown).toContain('\\!\\[\\[private-note\\]\\]');
+});
+
+it.each([
+  'obsidian://open?vault=Secret',
+  'javascript:alert(1)',
+  'file:///Users/private/secret.html',
+  'not a valid URL',
+])('renders non-web URL %s as inert text while retaining its marker', (url) => {
+  const input = visit({ title: 'Untrusted destination', url });
+  const markdown = renderVisit(input);
+
+  expect(markdown).not.toContain('[Untrusted destination](');
+  expect(markdown).toContain('Untrusted destination');
+  expect(markdown).toContain(stableVisitId(input));
+});
+
+it('keeps only HTTP and HTTPS URLs clickable', () => {
+  expect(renderVisit(visit({ url: 'http://example.com/path' })))
+    .toContain('[Example page](http://example.com/path)');
+  expect(renderVisit(visit({ url: 'https://example.com/path' })))
+    .toContain('[Example page](https://example.com/path)');
+});
+
+it('wraps malformed host-like URLs as inline code to prevent automatic links', () => {
+  const markdown = renderVisit(visit({
+    title: 'Host-like text',
+    url: 'www.evil.invalid/path',
+  }));
+
+  expect(markdown).toContain('`www.evil.invalid/path`');
+});
+
 it('escapes backslashes before closing brackets in titles', () => {
   const markdown = renderVisit(visit({ title: 'path\\]' }));
 
@@ -64,14 +124,15 @@ it('encodes Markdown delimiters in normalized URL destinations', () => {
   );
 });
 
-it('encodes Markdown delimiters in invalid URL destinations', () => {
+it('escapes Markdown delimiters while rendering an invalid URL inertly', () => {
   const markdown = renderVisit(
     visit({ title: 'Safe', url: 'not a url) [injected](https://evil.invalid)' }),
   );
 
   expect(markdown).toContain(
-    '[Safe](not%20a%20url%29%20%5Binjected%5D%28https://evil.invalid%29)',
+    'Safe — `not a url) [injected](https://evil.invalid)`',
   );
+  expect(markdown).not.toContain('[Safe](');
 });
 
 it('writes a new note with required frontmatter and a single blank line', () => {
@@ -98,4 +159,56 @@ it('extracts only valid sync markers', () => {
         '<!-- obsidian-browser-sync:chrome:NOT-VALID -->',
     ),
   ).toEqual(new Set(['1234567890abcdef12345678']));
+});
+
+it('extracts markers only from exact standalone marker lines', () => {
+  const valid = '1234567890abcdef12345678';
+  expect(extractImportedIds([
+    `  <!-- obsidian-browser-sync:chrome:${valid} -->`,
+    `label <!-- obsidian-browser-sync:chrome:${valid.replace(/8$/, '9')} -->`,
+    `<!-- obsidian-browser-sync:chrome:${valid} --> suffix`,
+    `<span title="<!-- obsidian-browser-sync:chrome:${valid} -->">label</span>`,
+  ].join('\n'))).toEqual(new Set([valid]));
+});
+
+it('ignores exact marker examples inside fenced code while supporting CRLF notes', () => {
+  const fenced = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+  const managed = 'cccccccccccccccccccccccc';
+  expect(extractImportedIds([
+    '```html',
+    `<!-- obsidian-browser-sync:chrome:${fenced} -->`,
+    '```',
+    `  <!-- obsidian-browser-sync:chrome:${managed} -->`,
+    '',
+  ].join('\r\n'))).toEqual(new Set([managed]));
+});
+
+it('does not let marker-shaped title or profile text become imported state', () => {
+  const injectedId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+  const markdown = renderVisit(visit({
+    title: `Title\n<!-- obsidian-browser-sync:chrome:${injectedId} -->`,
+    profileName: `Profile\n<!-- obsidian-browser-sync:chrome:${injectedId} -->`,
+  }));
+
+  expect(extractImportedIds(markdown)).toEqual(new Set([
+    stableVisitId(visit({
+      title: `Title\n<!-- obsidian-browser-sync:chrome:${injectedId} -->`,
+      profileName: `Profile\n<!-- obsidian-browser-sync:chrome:${injectedId} -->`,
+    })),
+  ]));
+  expect(markdown).not.toContain(`\n<!-- obsidian-browser-sync:chrome:${injectedId} -->\n`);
+});
+
+it('keeps stable IDs portable when only the local source key changes', () => {
+  const portable = visit({
+    sourceKey: 'chrome:path-hash-on-device-a',
+    profileId: 'Default',
+    sourceVisitId: '42',
+  });
+  const moved = {
+    ...portable,
+    sourceKey: 'chrome:path-hash-on-device-b',
+  };
+
+  expect(stableVisitId(moved)).toBe(stableVisitId(portable));
 });

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import initSqlJs from 'sql.js';
+import embeddedSqlWasm from './embedded-wasm';
 
 export interface SqliteDatabase {
   all<T extends Record<string, unknown>>(
@@ -18,23 +18,23 @@ export interface SqliteFactory {
 export interface SqliteRuntimeDependencies {
   initialize: typeof initSqlJs;
   readFile(path: string): Promise<Uint8Array>;
+  wasmBinary: Uint8Array;
 }
 
-const runtimeDependencies: SqliteRuntimeDependencies = { initialize: initSqlJs, readFile };
+const runtimeDependencies: SqliteRuntimeDependencies = {
+  initialize: initSqlJs,
+  readFile,
+  wasmBinary: embeddedSqlWasm,
+};
 
 export function createSqliteFactory(
-  installedPluginDirectory: string,
   dependencies: SqliteRuntimeDependencies = runtimeDependencies,
 ): SqliteFactory {
   let runtime: Promise<initSqlJs.SqlJsStatic> | undefined;
-  const initializeRuntime = async (): Promise<initSqlJs.SqlJsStatic> => {
-    const wasmPath = path.join(installedPluginDirectory, 'sql-wasm.wasm');
-    const wasmContents = await dependencies.readFile(wasmPath);
-    return dependencies.initialize({
-      locateFile: (file) => path.join(installedPluginDirectory, file),
-      wasmBinary: Uint8Array.from(wasmContents).buffer,
+  const initializeRuntime = async (): Promise<initSqlJs.SqlJsStatic> =>
+    dependencies.initialize({
+      wasmBinary: Uint8Array.from(dependencies.wasmBinary).buffer,
     });
-  };
 
   return {
     async open(databasePath) {

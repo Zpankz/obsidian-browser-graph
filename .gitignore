@@ -2,6 +2,5 @@
 .superpowers/
 node_modules/
 main.js
-sql-wasm.wasm
 coverage/
 *.tsbuildinfo

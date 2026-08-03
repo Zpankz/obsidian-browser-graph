@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSqliteFactory } from '../../src/sql/sqlite';
 
 describe('createSqliteFactory', () => {
-  it('initializes sql.js once using the WASM asset in the supplied plugin directory', async () => {
+  it('initializes sql.js once from embedded WASM and reads only database files', async () => {
     const fixtureSql = await initSqlJs({
       locateFile: (file) => path.join(process.cwd(), 'node_modules/sql.js/dist', file),
     });
@@ -16,14 +16,17 @@ describe('createSqliteFactory', () => {
     const wasmBytes = new Uint8Array([0, 97, 115, 109]);
 
     const initialize = vi.fn(async (config?: initSqlJs.SqlJsConfig) => {
-      expect(config?.locateFile?.('sql-wasm.wasm', '')).toBe('/installed/plugin/sql-wasm.wasm');
+      expect(config?.locateFile).toBeUndefined();
       expect(new Uint8Array(config?.wasmBinary ?? new ArrayBuffer(0)))
         .toEqual(wasmBytes);
       return fixtureSql;
     });
-    const readFile = vi.fn(async (filePath: string) =>
-      filePath.endsWith('sql-wasm.wasm') ? wasmBytes : bytes);
-    const factory = createSqliteFactory('/installed/plugin', { initialize, readFile });
+    const readFile = vi.fn(async () => bytes);
+    const factory = createSqliteFactory({
+      initialize,
+      readFile,
+      wasmBinary: wasmBytes,
+    });
 
     const first = await factory.open('/tmp/one.sqlite');
     const second = await factory.open('/tmp/two.sqlite');
@@ -35,7 +38,6 @@ describe('createSqliteFactory', () => {
     )).toEqual([{ id: 1, title: 'First' }]);
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(readFile.mock.calls.map(([filePath]) => filePath)).toEqual([
-      '/installed/plugin/sql-wasm.wasm',
       '/tmp/one.sqlite',
       '/tmp/two.sqlite',
     ]);

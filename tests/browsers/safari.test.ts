@@ -73,6 +73,51 @@ describe('SafariReader', () => {
     db.close();
   });
 
+  it('recovers a higher visit ID even when its corrected timestamp predates the overlap', async () => {
+    const db = await safariFixture([
+      { id: 6, historyItem: 1, visitTime: safariSeconds('2026-08-03T09:00:00Z') },
+      { id: 8, historyItem: 1, visitTime: safariSeconds('2026-08-03T09:00:00Z') },
+    ]);
+
+    const visits = new SafariReader().read(db, safariProfile(), {
+      visitedAtMs: Date.parse('2026-08-03T10:05:00Z'),
+      sourceVisitId: '7',
+    });
+
+    expect(visits.map((item) => item.sourceVisitId)).toEqual(['8']);
+    db.close();
+  });
+
+  it('skips corrupt timestamps without discarding healthy rows', async () => {
+    const now = Date.parse('2026-08-03T12:00:00Z');
+    const db = await safariFixture([
+      { id: 1, historyItem: 1, visitTime: -SAFARI_EPOCH_OFFSET_SECONDS - 1 },
+      { id: 2, historyItem: 1, visitTime: safariSeconds('2030-01-01T00:00:00Z') },
+      { id: 3, historyItem: 1, visitTime: safariSeconds('2026-08-03T10:00:00Z') },
+    ]);
+
+    expect(new SafariReader(() => now).read(db, safariProfile())
+      .map((item) => item.sourceVisitId)).toEqual(['3']);
+    db.close();
+  });
+
+  it('keeps valid fractional seconds below Date precision and rejects NULL timestamps', async () => {
+    const db = await sqliteFixture([
+      'CREATE TABLE history_items (id INTEGER PRIMARY KEY, url TEXT)',
+      'CREATE TABLE history_visits (id INTEGER PRIMARY KEY, history_item INTEGER, visit_time, title TEXT)',
+      "INSERT INTO history_items VALUES (1, 'https://example.com')",
+    ]);
+    db.run('INSERT INTO history_visits VALUES (1, 1, :time, :title)', {
+      ':time': safariSeconds('2026-08-03T10:00:00Z') + 0.000_123,
+      ':title': 'Example',
+    });
+    db.run("INSERT INTO history_visits VALUES (2, 1, NULL, 'Corrupt')");
+
+    expect(new SafariReader(() => Date.parse('2026-08-04T00:00:00Z'))
+      .read(db, safariProfile()).map((item) => item.sourceVisitId)).toEqual(['1']);
+    db.close();
+  });
+
   it('rejects a missing required column with a clear schema error', async () => {
     const db = await sqliteFixture([
       'CREATE TABLE history_items (id INTEGER PRIMARY KEY, url TEXT)',

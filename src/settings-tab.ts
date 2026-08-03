@@ -1,4 +1,11 @@
-import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
+import {
+  AbstractInputSuggest,
+  PluginSettingTab,
+  Setting,
+  TFolder,
+  type App,
+  type Plugin,
+} from 'obsidian';
 import type {
   BrowserId,
   BrowserProfile,
@@ -42,6 +49,36 @@ const browserDescriptions: Record<BrowserId, string> = {
 };
 
 const saveError = 'Could not save this setting. Check that the vault is writable, then try again.';
+
+export class VaultFolderSuggest extends AbstractInputSuggest<string> {
+  constructor(
+    app: App,
+    inputEl: HTMLInputElement,
+    private readonly onSelected: (path: string) => Promise<void>,
+  ) {
+    super(app, inputEl);
+  }
+
+  protected getSuggestions(query: string): string[] {
+    const normalizedQuery = query.toLowerCase();
+    return this.app.vault.getAllLoadedFiles()
+      .filter((file): file is TFolder => file instanceof TFolder)
+      .map((folder) => folder.path)
+      .filter((folder) => isSafeVaultFolder(folder))
+      .filter((folder) => folder.toLowerCase().includes(normalizedQuery))
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  renderSuggestion(value: string, element: HTMLElement): void {
+    element.setText(value);
+  }
+
+  selectSuggestion(value: string): void {
+    this.setValue(value);
+    this.close();
+    void this.onSelected(value);
+  }
+}
 
 export class BrowserSyncSettingTab extends PluginSettingTab {
   private displaySequence = 0;
@@ -103,13 +140,11 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
     const outputFolder = new Setting(containerEl)
       .setName('Output folder')
       .setDesc('Vault-relative folder where browser history notes are stored.');
-    outputFolder.addText((text) => text
-      .setPlaceholder('Browser History')
-      .setValue(this.browserSyncPlugin.data.settings.outputFolder)
-      .onChange(async (value) => {
+    outputFolder.addText((text) => {
+      const saveOutputFolder = async (value: string): Promise<void> => {
         if (!isSafeVaultFolder(value)) {
           outputFolder.setErrorMessage(
-            'Enter a vault-relative folder outside .obsidian, without parent traversal.',
+            'Enter a portable vault-relative folder outside .obsidian, without reserved path names.',
           );
           return;
         }
@@ -127,7 +162,13 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
           text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
           outputFolder.setErrorMessage(saveError);
         }
-      }));
+      };
+      text
+        .setPlaceholder('Browser History')
+        .setValue(this.browserSyncPlugin.data.settings.outputFolder)
+        .onChange(saveOutputFolder);
+      new VaultFolderSuggest(this.app, text.inputEl, saveOutputFolder);
+    });
 
     const layout = new Setting(containerEl)
       .setName('Layout')

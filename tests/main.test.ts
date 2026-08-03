@@ -14,12 +14,16 @@ interface SettingRecord {
   disabled: boolean;
   error?: string | null;
   toggle?: ComponentRecord<boolean>;
-  text?: ComponentRecord<string> & { placeholder?: string };
+  text?: ComponentRecord<string> & {
+    inputEl: { value: string };
+    placeholder?: string;
+  };
   dropdown?: ComponentRecord<string> & { options: Record<string, string> };
 }
 
 const obsidianMock = vi.hoisted(() => ({
   records: [] as SettingRecord[],
+  suggests: [] as unknown[],
 }));
 
 vi.mock('obsidian', () => {
@@ -39,6 +43,21 @@ vi.mock('obsidian', () => {
     ) {
       this.containerEl = { empty() {} };
     }
+  }
+
+  class AbstractInputSuggest {
+    constructor(
+      public app: unknown,
+      public inputEl: { value: string },
+    ) {
+      obsidianMock.suggests.push(this);
+    }
+
+    setValue(value: string) {
+      this.inputEl.value = value;
+    }
+
+    close() {}
   }
 
   class Setting {
@@ -99,14 +118,21 @@ vi.mock('obsidian', () => {
     }
 
     addText(callback: (component: unknown) => void) {
-      const record: ComponentRecord<string> & { placeholder?: string } = {
+      const inputEl = { value: '' };
+      const record: ComponentRecord<string> & {
+        inputEl: { value: string };
+        placeholder?: string;
+      } = {
         disabled: false,
+        inputEl,
         value: '',
       };
       this.record.text = record;
       callback({
+        inputEl,
         setValue(value: string) {
           record.value = value;
+          inputEl.value = value;
           return this;
         },
         setPlaceholder(placeholder: string) {
@@ -146,10 +172,15 @@ vi.mock('obsidian', () => {
     }
   }
 
-  class TFile {}
-  class TFolder {}
+  class TFile {
+    constructor(public path = '') {}
+  }
+  class TFolder {
+    constructor(public path = '') {}
+  }
 
   return {
+    AbstractInputSuggest,
     FileSystemAdapter: class {},
     Notice: class {},
     Platform: { isMacOS: false },
@@ -168,6 +199,7 @@ import type {
   PluginManifest,
   PluginSettingTab,
 } from 'obsidian';
+import { TFolder } from 'obsidian';
 import { ChromiumReader } from '../src/browsers/chromium';
 import { FirefoxReader } from '../src/browsers/firefox';
 import { SafariReader } from '../src/browsers/safari';
@@ -182,7 +214,7 @@ import BrowserSyncPlugin, {
   type BrowserSyncRuntime,
 } from '../src/main';
 import { BrowserSyncSettingTab } from '../src/settings-tab';
-import { DEFAULT_SETTINGS } from '../src/settings';
+import { DEFAULT_SETTINGS, hashDeviceIdentityToken } from '../src/settings';
 import { runImport } from '../src/sync/importer';
 import { fakeVault, fakeVaultWithRenderedVisit } from './helpers/fake-vault';
 import { visit } from './helpers/visits';
@@ -193,13 +225,22 @@ const emptySummary: ImportSummary = {
   skippedProfiles: 0,
   failedProfiles: [],
 };
-const MACHINE_A = 'a'.repeat(32);
-const MACHINE_B = 'b'.repeat(32);
+const TOKEN_A = 'a'.repeat(64);
+const TOKEN_B = 'b'.repeat(64);
+const DEVICE_A = hashDeviceIdentityToken(TOKEN_A);
+const DEVICE_B = hashDeviceIdentityToken(TOKEN_B);
+
+function deviceIdentity(token: string) {
+  return {
+    read: () => token,
+    write: vi.fn(),
+  };
+}
 
 function clonedDefaults(): PersistedData {
   return {
-    version: 2,
-    machineNamespace: MACHINE_A,
+    version: 3,
+    deviceIdentityHash: DEVICE_A,
     settings: {
       ...DEFAULT_SETTINGS,
       enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
@@ -213,7 +254,7 @@ function runtime(
 ): BrowserSyncRuntime {
   return {
     platform: 'linux',
-    machineNamespace: MACHINE_A,
+    deviceIdentity: deviceIdentity(TOKEN_A),
     vault: fakeVault(),
     discover: vi.fn(async () => []),
     readVisits: vi.fn(async () => []),
@@ -236,8 +277,13 @@ class PluginHarness extends BrowserSyncPlugin {
       data: PersistedData,
       callIndex: number,
     ) => Promise<void> = async () => {},
+    vaultFolders: string[] = [],
   ) {
-    super({ vault: {} } as App, { id: 'obsidian-browser-sync' } as PluginManifest);
+    super({
+      vault: {
+        getAllLoadedFiles: () => vaultFolders.map((folder) => new TFolder(folder)),
+      },
+    } as unknown as App, { id: 'browser-history-sync' } as PluginManifest);
   }
 
   override async loadData(): Promise<unknown> {
@@ -290,6 +336,7 @@ function setting(name: string): SettingRecord {
 describe('BrowserSyncPlugin', () => {
   beforeEach(() => {
     obsidianMock.records.length = 0;
+    obsidianMock.suggests.length = 0;
   });
 
   it('registers exactly one manual import command and no startup import', async () => {
@@ -309,6 +356,35 @@ describe('BrowserSyncPlugin', () => {
     await plugin.commands[0].callback?.();
 
     expect(fakeRuntime.runImporter).toHaveBeenCalledOnce();
+  });
+
+  it('captures command settings before deferred folder preparation', async () => {
+    const folderReady = deferred();
+    const vault = fakeVault();
+    vault.ensureFolder = vi.fn(async () => {
+      await folderReady.promise;
+    });
+    const runImporter = vi.fn(async () => emptySummary);
+    const plugin = new PluginHarness(undefined, runtime({ vault, runImporter }));
+    await plugin.onload();
+    const original = structuredClone(plugin.data.settings);
+
+    const importing = plugin.importBrowserHistory();
+    await vi.waitFor(() => expect(vault.ensureFolder).toHaveBeenCalledWith(
+      original.outputFolder,
+    ));
+    plugin.data.settings.enabledBrowsers.chrome = false;
+    plugin.data.settings.enabledBrowsers.firefox = false;
+    plugin.data.settings.outputFolder = 'Changed History';
+    plugin.data.settings.layout = 'flat';
+    plugin.data.settings.period = 'day';
+    folderReady.resolve();
+    await importing;
+
+    expect(runImporter).toHaveBeenCalledWith(
+      expect.objectContaining({ settings: original }),
+      expect.any(Object),
+    );
   });
 
   it('migrates loaded data and persists settings through one validated method', async () => {
@@ -344,7 +420,7 @@ describe('BrowserSyncPlugin', () => {
     expect(plugin.saved).toHaveLength(1);
   });
 
-  it('rescans a same-path profile when state was copied from another machine', async () => {
+  it('rescans a same-path profile when state was copied from another device', async () => {
     const samePathProfile: BrowserProfile = {
       sourceKey: 'chrome:same-path',
       browserId: 'chrome',
@@ -374,8 +450,8 @@ describe('BrowserSyncPlugin', () => {
     const vault = fakeVaultWithRenderedVisit(existing);
     const readVisits = vi.fn(async () => [existing, newer]);
     const plugin = new PluginHarness({
-      version: 2,
-      machineNamespace: MACHINE_A,
+      version: 3,
+      deviceIdentityHash: DEVICE_A,
       settings: clonedDefaults().settings,
       cursors: {
         [samePathProfile.sourceKey]: {
@@ -384,7 +460,7 @@ describe('BrowserSyncPlugin', () => {
         },
       },
     }, runtime({
-      machineNamespace: MACHINE_B,
+      deviceIdentity: deviceIdentity(TOKEN_B),
       vault,
       discover: vi.fn(async () => [samePathProfile]),
       readVisits,
@@ -400,12 +476,13 @@ describe('BrowserSyncPlugin', () => {
     expect(vault.readText('Browser History/2026/2026-08.md')
       .match(/obsidian-browser-sync/g)).toHaveLength(2);
     expect(plugin.saved.at(-1)).toMatchObject({
-      version: 2,
-      machineNamespace: MACHINE_B,
+      version: 3,
+      deviceIdentityHash: DEVICE_B,
       cursors: {
         [samePathProfile.sourceKey]: { sourceVisitId: '2' },
       },
     });
+    expect(JSON.stringify(plugin.saved)).not.toContain(TOKEN_B);
   });
 
   it('serializes overlapping saves and keeps a later success after an earlier failure', async () => {
@@ -623,6 +700,27 @@ describe('BrowserSyncPlugin', () => {
     consoleError.mockRestore();
   });
 
+  it('warns when a sensitive temporary database snapshot may remain', async () => {
+    const notice = vi.fn();
+    const plugin = new PluginHarness(undefined, runtime({
+      notice,
+      runImporter: vi.fn(async () => ({
+        ...emptySummary,
+        failedProfiles: [{
+          sourceKey: 'chrome:profile',
+          message: 'Cleanup failed for sensitive temporary database snapshot /private/tmp/run. The snapshot may remain.',
+        }],
+      })),
+    }));
+    await plugin.onload();
+
+    await plugin.importBrowserHistory();
+
+    expect(notice.mock.calls.flat().join('\n')).toMatch(
+      /sensitive temporary database snapshot may remain/i,
+    );
+  });
+
   it.each(['EACCES', 'EPERM'])('%s Safari failures explain Full Disk Access', async (code) => {
     const secretUrl = 'https://private.example/visited';
     const notice = vi.fn();
@@ -680,6 +778,7 @@ describe('BrowserSyncPlugin', () => {
 describe('BrowserSyncSettingTab', () => {
   beforeEach(() => {
     obsidianMock.records.length = 0;
+    obsidianMock.suggests.length = 0;
   });
 
   it('renders every browser, output choice, and detected profile status', async () => {
@@ -746,6 +845,36 @@ describe('BrowserSyncSettingTab', () => {
 
     expect(output.error).toBeNull();
     expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('History/Imported');
+  });
+
+  it('suggests safe vault folders and saves a selected suggestion', async () => {
+    const plugin = new PluginHarness(
+      undefined,
+      runtime(),
+      async () => {},
+      ['Projects', 'History/2026', '.obsidian', 'CON', 'Archive'],
+    );
+    await plugin.onload();
+    plugin.settingTabs[0].display();
+
+    expect(obsidianMock.suggests).toHaveLength(1);
+    const suggest = obsidianMock.suggests[0] as {
+      getSuggestions(query: string): string[];
+      selectSuggestion(value: string): void;
+    };
+    expect(suggest.getSuggestions('')).toEqual([
+      'Archive',
+      'History/2026',
+      'Projects',
+    ]);
+    expect(suggest.getSuggestions('hist')).toEqual(['History/2026']);
+
+    suggest.selectSuggestion('Projects');
+
+    await vi.waitFor(() => {
+      expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('Projects');
+    });
+    expect(setting('Output folder').text?.value).toBe('Projects');
   });
 
   it('restores a control and reports an actionable error when saving fails', async () => {

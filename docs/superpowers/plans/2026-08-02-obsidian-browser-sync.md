@@ -4,7 +4,7 @@
 
 **Goal:** Build a desktop-only Obsidian plugin that manually imports all visits from enabled local browser profiles into configurable, idempotent Markdown history notes.
 
-**Architecture:** Browser-specific discovery and SQLite readers emit one normalized visit contract. A platform-independent import service applies cursor overlap, stable-ID deduplication, temporal grouping, vault-safe path planning, serialized append-only writes, and per-profile cursor commits. The Obsidian entry point and settings tab adapt that core to the desktop app, while the SQLite WASM asset keeps releases portable across macOS, Windows, and Linux.
+**Architecture:** Browser-specific discovery and SQLite readers emit one normalized visit contract. A platform-independent import service applies timestamp/ID cursor recovery, vault-wide portable-marker deduplication, temporal grouping, vault-safe path planning, serialized append-only writes, and per-profile cursor commits from immutable command-time settings. The Obsidian entry point and settings tab adapt that core to the desktop app, while `sql.js` WASM is embedded in `main.js` for a three-file Community release on macOS, Windows, and Linux.
 
 **Tech Stack:** TypeScript 5.8+, Obsidian API, Node filesystem APIs, esbuild 0.25+, Vitest, sql.js 1.14.1, ESLint 9
 
@@ -17,8 +17,8 @@
 - Run only from the `Import browser history` command; do not add timers, startup hooks, network calls, or browser writes.
 - Default output folder is `Browser History`, default layout is `tiered`, and default period is `month`.
 - A profile cursor advances only after all note writes for that profile succeed.
-- Hidden stable IDs in Markdown are the final idempotency authority.
-- Release artifacts are `main.js`, `manifest.json`, `styles.css`, and `sql-wasm.wasm`.
+- Vault-wide hidden stable IDs in Markdown are the final idempotency authority and never depend on local paths or device identity.
+- Release artifacts are exactly `main.js`, `manifest.json`, and optional `styles.css`; WASM bytes are embedded in `main.js`.
 - Use test-driven development: write and run each failing test before adding its production behavior.
 
 ---
@@ -27,11 +27,14 @@
 
 - `src/domain.ts`: shared browser, visit, state, settings, result, and port types.
 - `src/settings.ts`: defaults, validation, and persisted-data migration.
+- `src/device-identity.ts`: durable local token storage and hashing.
+- `src/vault-path.ts`: shared portable/Windows-safe vault path validation.
 - `src/output/periods.ts`: local-time period keys, ISO week calculations, and flat/tiered paths.
 - `src/output/markdown.ts`: stable IDs, Markdown rendering, marker extraction, and note assembly.
 - `src/platform/catalog.ts`: browser catalog and OS-specific installation roots.
 - `src/platform/discovery.ts`: profile discovery using injected filesystem and home/platform values.
 - `src/sql/sqlite.ts`: singleton sql.js initialization and read-only in-memory database adapter.
+- `src/sql/embedded-wasm.ts`: typed source placeholder replaced with embedded production WASM bytes.
 - `src/sql/snapshot.ts`: temporary snapshot lifecycle and guaranteed cleanup.
 - `src/browsers/chromium.ts`: Chromium schema detection and visit mapping.
 - `src/browsers/firefox.ts`: Firefox schema detection and visit mapping.
@@ -42,7 +45,8 @@
 - `src/main.ts`: plugin lifecycle, command registration, persistence, and notices.
 - `tests/helpers/`: fake filesystem/vault, sql.js fixture builder, and fixed-time utilities.
 - `tests/**/*.test.ts`: focused behavior tests corresponding to the production modules.
-- `manifest.json`, `package.json`, `tsconfig.json`, `vitest.config.ts`, `esbuild.config.mjs`, `eslint.config.mjs`: toolchain and release configuration.
+- `manifest.json`, `versions.json`, `package.json`, `tsconfig.json`, `vitest.config.ts`, `vitest.release.config.ts`, `esbuild.config.mjs`, `eslint.config.mjs`: toolchain and release configuration.
+- `LICENSE`: MIT license naming `git-akihakune`.
 - `README.md`: installation, permissions, settings, output examples, and privacy behavior.
 
 ---
@@ -64,7 +68,7 @@
 - Create: `tests/settings.test.ts`
 
 **Interfaces:**
-- Produces: `PluginSettings`, `PersistedData`, `ProfileCursor`, `NormalizedVisit`, `BrowserProfile`, `ImportSummary`, `VaultPort`, `DEFAULT_SETTINGS`, and `migratePersistedData(raw)`.
+- Produces: `PluginSettings`, `PersistedData`, `ProfileCursor`, `NormalizedVisit`, `BrowserProfile`, `ImportSummary`, `VaultPort`, `DEFAULT_SETTINGS`, and `migratePersistedData(raw, currentDeviceIdentityHash)`.
 - Consumes: no earlier task interfaces.
 
 - [ ] **Step 1: Add the failing settings-default and migration tests**
@@ -73,10 +77,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, migratePersistedData } from '../src/settings';
 
+const DEVICE_HASH = 'a'.repeat(64);
+
 describe('migratePersistedData', () => {
   it('uses the approved defaults for missing data', () => {
-    expect(migratePersistedData(undefined)).toEqual({
-      version: 1,
+    expect(migratePersistedData(undefined, DEVICE_HASH)).toEqual({
+      version: 3,
+      deviceIdentityHash: DEVICE_HASH,
       settings: DEFAULT_SETTINGS,
       cursors: {},
     });
@@ -89,7 +96,7 @@ describe('migratePersistedData', () => {
     const result = migratePersistedData({
       settings: { outputFolder: '../outside', layout: 'wide', period: 'hour' },
       cursors: { firefox: { visitedAtMs: 'bad' } },
-    });
+    }, DEVICE_HASH);
     expect(result.settings.outputFolder).toBe('Browser History');
     expect(result.settings.layout).toBe('tiered');
     expect(result.settings.period).toBe('month');
@@ -116,7 +123,8 @@ Use the official Obsidian sample plugin build shape. Set these scripts in `packa
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "check": "npm run lint && npm test && npm run build"
+    "test:release": "vitest run --config vitest.release.config.ts",
+    "check": "npm run lint && npm test && npm run build && npm run test:release"
   }
 }
 ```
@@ -143,7 +151,8 @@ export interface ProfileCursor {
 }
 
 export interface PersistedData {
-  version: 1;
+  version: 3;
+  deviceIdentityHash: string;
   settings: PluginSettings;
   cursors: Record<string, ProfileCursor>;
 }
@@ -178,12 +187,13 @@ export interface VaultPort {
   create(path: string, content: string): Promise<void>;
   append(path: string, content: string): Promise<void>;
   ensureFolder(path: string): Promise<void>;
+  scanMarkdownFiles(visit: (markdown: string) => void): Promise<void>;
 }
 ```
 
-Implement `DEFAULT_SETTINGS`, `isSafeVaultFolder`, and `migratePersistedData`. Reject absolute paths, `..` segments, empty normalized paths, and destinations at or below `.obsidian`. Set Safari disabled off macOS later at runtime; persisted cross-platform defaults keep all first-class and known compatible IDs enabled.
+Implement `DEFAULT_SETTINGS`, the shared Windows-safe `isSafeVaultFolder`, durable random local device-token hashing, and version-3 `migratePersistedData`. Reject unsafe cursor timestamps and invalidate cursors on a missing/changed device hash. Reject absolute/drive-relative paths, `..`, empty paths, Windows reserved/control characters and device components, trailing dots/spaces, and `.obsidian` aliases on every host. Set Safari disabled off macOS later at runtime; persisted cross-platform defaults keep all first-class and known compatible IDs enabled.
 
-Set `manifest.json` to ID `obsidian-browser-sync`, name `Browser Sync`, version `0.1.0`, minimum app version `1.0.0`, and `isDesktopOnly: true`.
+Set `manifest.json` to Community-safe ID `browser-history-sync`, name `Browser Sync`, version `0.1.0`, minimum app version `1.13.0`, author `git-akihakune`, a concise description, and `isDesktopOnly: true`. Add the root MIT `LICENSE` and package license metadata.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -299,13 +309,13 @@ Expected: FAIL because the module and visit helper are missing.
 
 - [ ] **Step 7: Implement stable IDs and appendable Markdown**
 
-Use Node `createHash('sha256')`, joining identity fields with a NUL separator and truncating the hex digest to 24 characters. Replace control characters and line breaks in titles, escape `[` and `]`, percent-encode unsafe URL characters through `new URL(url).toString()`, and fall back to the URL when the title is empty. Markers must match only:
+Use Node `createHash('sha256')`, joining portable browser/profile/visit fields (never local source paths or device identity) with a NUL separator and truncating the hex digest to 24 characters. Escape raw HTML and Markdown in all untrusted titles/browser/profile labels. Link only parsed HTTP(S) URLs; render every other scheme or malformed URL inertly while retaining its entry and marker. Markers must match exact standalone non-code lines only; accept at most three leading spaces and ignore fenced or indented code:
 
 ```ts
-const MARKER = /<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->/g;
+const MARKER_LINE = /^ {0,3}<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->[ ]*$/;
 ```
 
-`newNote` writes YAML keys `browser-sync: true` and `period: <label>`, then `# Browser history`, one blank line, and entries. `renderVisit` writes local `HH:mm:ss`, title link, browser/profile labels, and its marker on the next indented line.
+`newNote` writes YAML keys `browser-sync: true` and `period: <label>`, then `# Browser history`, one blank line, and entries. `renderVisit` writes local `HH:mm:ss`, a safe linked or inert visit label, safe browser/profile labels, and its backward-compatible `obsidian-browser-sync` marker on the next indented line.
 
 - [ ] **Step 8: Run output tests and commit**
 
@@ -427,9 +437,9 @@ Run: `npm test -- tests/sql/snapshot.test.ts`
 
 Expected: FAIL because snapshot support is missing.
 
-- [ ] **Step 3: Implement WASM initialization and snapshot cleanup**
+- [ ] **Step 3: Implement embedded-WASM initialization and snapshot cleanup**
 
-Initialize `sql.js` once and locate `sql-wasm.wasm` relative to the installed plugin directory supplied by `src/main.ts`. Wrap the resulting database behind:
+Initialize `sql.js` once from WASM bytes embedded into `main.js` by the build; never read a sidecar from the installed plugin directory. Wrap the resulting database behind:
 
 ```ts
 export interface SqliteDatabase {
@@ -439,7 +449,7 @@ export interface SqliteDatabase {
 }
 ```
 
-`withDatabaseSnapshot` must create a unique `mkdtemp` directory, copy the main database, call the operation, and recursively remove only that exact temporary directory in `finally`.
+`withDatabaseSnapshot` must create a unique `mkdtemp` directory, copy the main database, call the operation, and recursively remove only that exact temporary directory. Preserve both failures if the operation and cleanup fail, with the operation primary; identify cleanup-only failure as a sensitive snapshot that may remain.
 
 - [ ] **Step 4: Run the snapshot test and verify GREEN**
 
@@ -487,7 +497,7 @@ export interface BrowserHistoryReader {
 }
 ```
 
-Chromium joins `visits` to `urls`, Firefox joins `moz_historyvisits` to `moz_places`, and Safari joins `history_visits` to `history_items`. Query from `cursor.visitedAtMs - 120_000` milliseconds to provide a two-minute overlap. Sort by `visitedAt`, then numeric source ID when possible, otherwise lexical source ID. Reject missing required tables or columns with `Unsupported <browser> history schema`.
+Chromium joins `visits` to `urls`, Firefox joins `moz_historyvisits` to `moz_places`, and Safari joins `history_visits` to `history_items`. Query from `cursor.visitedAtMs - 120_000` milliseconds or a source visit ID higher than its independent high-water field, with deterministic SQL parameter binding and ordering. Sort by `visitedAt`, then numeric source ID when possible, otherwise lexical source ID. Skip non-finite, unrepresentable, negative, and implausibly future timestamps at each reader boundary. Reject missing required tables or columns with `Unsupported <browser> history schema`.
 
 - [ ] **Step 8: Run reader tests and verify GREEN**
 
@@ -495,9 +505,9 @@ Run: `npm test -- tests/browsers tests/sql`
 
 Expected: all snapshot and reader tests pass.
 
-- [ ] **Step 9: Copy and verify the production WASM asset, then commit**
+- [ ] **Step 9: Embed and verify the production WASM asset, then commit**
 
-Add an esbuild production step that copies `node_modules/sql.js/dist/sql-wasm.wasm` to the project root beside `main.js`. Do not commit generated `main.js`; do commit the WASM only if the repository's release policy chooses source-controlled artifacts. For this repository, ignore both generated files and verify them during build.
+Add an esbuild binary-loader step that replaces the typed source placeholder with `node_modules/sql.js/dist/sql-wasm.wasm` bytes inside generated `main.js`. Remove any stale sidecar and do not ignore, require, emit, stage, or install `sql-wasm.wasm`. Keep generated `main.js` ignored and verify the embedded runtime through the staged release test.
 
 ```bash
 git add src/sql src/browsers tests/sql tests/browsers tests/helpers/sqlite-fixture.ts esbuild.config.mjs .gitignore
@@ -553,7 +563,7 @@ export interface ImportDependencies {
 }
 ```
 
-Filter profiles by browser toggle. Process profile reads independently. Build one global map of destination path to sorted candidate entries, read each note once, suppress existing marker IDs, and serialize writes per path. Track which profile owns each candidate. Only update and persist a profile cursor after all its candidate paths succeed. Use the newest `(visitedAtMs, sourceVisitId)` pair as its cursor.
+Snapshot every setting when the command/import is invoked, then filter profiles by the snapshotted browser toggles. Process profile reads independently. Scan Markdown files only to build one vault-wide exact-marker index, then build one global map of destination path to sorted candidate entries from the snapshotted output/layout/period settings. Read each destination once, suppress IDs already present anywhere in the managed-marker index, and serialize writes per path without rewriting user content. Track which profile owns each candidate. Only update and persist a profile cursor after all its candidate paths succeed. Advance timestamp and source visit ID as independent monotonic high-water fields.
 
 - [ ] **Step 4: Add failing interruption and state-recovery tests**
 
@@ -579,7 +589,7 @@ it('recovers from missing cursor state by reading hidden markers', async () => {
 
 Run: `npm test -- tests/sync/importer.test.ts`
 
-Expected before fixes: the two new tests fail for cursor advancement and duplicate recovery. Implement per-profile path success tracking and existing-marker scanning, then rerun until all importer tests pass.
+Expected before fixes: the new tests fail for cursor advancement and duplicate recovery. Implement per-profile path success tracking, vault-wide Markdown marker scanning, different-path recovery, and an immutable deferred-run settings test, then rerun until all importer tests pass.
 
 - [ ] **Step 6: Add and pass concurrency and partial-failure tests**
 
@@ -661,7 +671,7 @@ Expected: FAIL until the final plugin class exists.
 
 - [ ] **Step 6: Implement the plugin entry point**
 
-On load: migrate `loadData()`, create a settings tab, initialize sql.js with the installed plugin directory, and register only:
+On load: resolve the injected durable local device token, migrate `loadData()` to state version 3 using only its hash, create a settings tab, initialize sql.js from embedded bytes, and register only:
 
 ```ts
 this.addCommand({
@@ -671,11 +681,11 @@ this.addCommand({
 });
 ```
 
-The callback validates settings, discovers enabled profiles, selects the reader by `readerKind`, runs the importer, saves state after cursor commits, and shows actionable notices. Map `EACCES`/`EPERM` for Safari on macOS to Full Disk Access guidance. Do not log full URLs.
+The callback snapshots and validates settings before its first asynchronous boundary, discovers enabled profiles, selects the reader by `readerKind`, runs the importer, saves state after cursor commits, and shows actionable notices. Map `EACCES`/`EPERM` for Safari on macOS to Full Disk Access guidance. Do not log full URLs.
 
 - [ ] **Step 7: Implement the settings tab**
 
-Render separate toggles for Safari, Firefox, Chrome, Edge, Brave, Chromium, and Vivaldi; an output-folder text field; dropdowns for layout and period; and a read-only detected-profile/status section. Disable Safari's toggle outside macOS. Validate on change and save through one plugin method. Use only Obsidian components (`Setting`, `PluginSettingTab`) and a small CSS class for status rows.
+Render separate toggles for Safari, Firefox, Chrome, Edge, Brave, Chromium, and Vivaldi; an output-folder text field with an `AbstractInputSuggest` backed by safe vault folders; dropdowns for layout and period; and a read-only detected-profile/status section. Disable Safari's toggle outside macOS. Validate suggestions, typed settings, and adapter writes through the shared cross-host path rules, and save through one plugin method. Use Obsidian components and a small CSS class for status rows.
 
 - [ ] **Step 8: Run focused and full tests, then commit**
 
@@ -697,11 +707,21 @@ git commit -m "feat: expose browser import in Obsidian"
 ### Task 7: Documentation, Release Verification, and Cross-Platform Acceptance
 
 **Files:**
-- Create: `README.md`
+- Modify: `README.md`
 - Modify: `package.json`
+- Modify: `package-lock.json`
 - Modify: `esbuild.config.mjs`
 - Modify: `manifest.json`
-- Create: `tests/release.test.ts`
+- Modify: `.gitignore`
+- Create: `LICENSE`
+- Modify: `src/sql/sqlite.ts`
+- Create: `src/sql/embedded-wasm.ts`
+- Modify: `src/settings-tab.ts`
+- Modify: `tests/sql/sqlite.test.ts`
+- Modify: `tests/main.test.ts`
+- Modify: `tests/release.test.ts`
+- Modify: `docs/superpowers/specs/2026-08-02-obsidian-browser-sync-design.md`
+- Modify: `docs/superpowers/plans/2026-08-02-obsidian-browser-sync.md`
 
 **Interfaces:**
 - Consumes: final plugin behavior and build artifacts.
@@ -712,9 +732,14 @@ git commit -m "feat: expose browser import in Obsidian"
 ```ts
 it('builds the complete desktop-only release', async () => {
   const manifest = JSON.parse(await readFile('manifest.json', 'utf8'));
-  expect(manifest.id).toBe('obsidian-browser-sync');
+  expect(manifest).toMatchObject({
+    id: 'browser-history-sync',
+    author: 'git-akihakune',
+    isDesktopOnly: true,
+    minAppVersion: '1.13.0',
+  });
   expect(manifest.isDesktopOnly).toBe(true);
-  for (const artifact of ['main.js', 'manifest.json', 'styles.css', 'sql-wasm.wasm']) {
+  for (const artifact of ['main.js', 'manifest.json', 'styles.css']) {
     expect((await stat(artifact)).size).toBeGreaterThan(0);
   }
 });
@@ -722,13 +747,13 @@ it('builds the complete desktop-only release', async () => {
 
 - [ ] **Step 2: Run release test without building and verify RED**
 
-Run: `npm test -- tests/release.test.ts`
+Run: `npm run test:release`
 
-Expected: FAIL because generated `main.js` and `sql-wasm.wasm` are absent from a clean checkout.
+Expected: FAIL before the build/metadata changes because the Community manifest or generated embedded-WASM `main.js` is not ready.
 
 - [ ] **Step 3: Finalize the production build**
 
-Make `npm run build` typecheck, bundle/minify `src/main.ts` as CommonJS targeting ES2021 with `obsidian`, Electron, CodeMirror, Lezer, and Node built-ins external, then copy the production WASM asset. Ensure the WASM runtime resolves the file inside the installed plugin directory rather than the development working directory.
+Make `npm run build` typecheck, bundle/minify `src/main.ts` as CommonJS targeting ES2021 with `obsidian`, Electron, CodeMirror, Lezer, and Node built-ins external, and embed the production WASM bytes through esbuild's binary loader. Remove any stale `sql-wasm.wasm`; no installed sidecar is read or emitted. The staged release test must load only the three Community files and open/query a real synthetic SQLite database.
 
 - [ ] **Step 4: Write user documentation**
 
@@ -739,11 +764,11 @@ Document:
 - All settings and the default `Browser History/2026/2026-08.md` example.
 - Flat and tiered path examples, including ISO-week boundary behavior.
 - All-profile behavior and repeated visits.
-- Idempotency markers and machine-specific cursor state.
+- Vault-wide portable idempotency markers and version-3 device-specific cursor state backed by a local random token whose hash alone enters `data.json`.
 - Safari Full Disk Access steps and browser-lock/retry guidance.
 - Local-only privacy model and absence of network/browser writes.
-- Source installation and release installation instructions.
-- A recommendation for Git-controlled vaults: ignore installed plugin artifacts or accept the approximately 660 kB WASM blob; generated history is Markdown.
+- Community, manual three-file release, and source installation instructions using plugin path `browser-history-sync`.
+- A recommendation for Git-controlled vaults: ignore the installed plugin directory or intentionally version the three Community files; explain that WASM is embedded in `main.js` and generated history is Markdown.
 
 - [ ] **Step 5: Run the full verification gate**
 
@@ -757,9 +782,9 @@ Expected: all tests pass with zero failures.
 
 Run: `npm run build`
 
-Expected: exit 0 and all four release artifacts exist.
+Expected: exit 0 and all three Community release artifacts exist with WASM embedded in `main.js`.
 
-Run: `npm test -- tests/release.test.ts`
+Run: `npm run test:release`
 
 Expected: release test passes after the fresh build.
 
@@ -774,8 +799,8 @@ Read `docs/superpowers/specs/2026-08-02-obsidian-browser-sync-design.md` line by
 - [ ] **Step 7: Commit the verified release**
 
 ```bash
-git add README.md package.json package-lock.json esbuild.config.mjs manifest.json tests/release.test.ts
-git commit -m "docs: prepare browser sync release"
+git add .gitignore LICENSE README.md package.json package-lock.json esbuild.config.mjs manifest.json src/sql/sqlite.ts src/sql/embedded-wasm.ts src/settings-tab.ts tests/sql/sqlite.test.ts tests/main.test.ts tests/release.test.ts docs/superpowers/specs/2026-08-02-obsidian-browser-sync-design.md docs/superpowers/plans/2026-08-02-obsidian-browser-sync.md
+git commit -m "fix: finalize community-safe browser sync"
 ```
 
 ---
@@ -789,8 +814,8 @@ npm ci
 npm run lint
 npm test
 npm run build
-npm test -- tests/release.test.ts
+npm run test:release
 git status --short
 ```
 
-Expected: dependency installation exits 0; lint has no warnings; all tests pass; build exits 0; the release test confirms all four artifacts; Git status shows only intentionally ignored generated artifacts or is clean.
+Expected: dependency installation exits 0; lint has no warnings; all tests pass; build exits 0; the release test confirms the exact three-file source-independent Community package and real SQLite query; Git status shows only intentionally ignored generated `main.js` or is clean.

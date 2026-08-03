@@ -10,7 +10,6 @@ const RELEASE_ARTIFACTS = [
   'main.js',
   'manifest.json',
   'styles.css',
-  'sql-wasm.wasm',
 ] as const;
 
 interface StagedSqliteDatabase {
@@ -19,7 +18,7 @@ interface StagedSqliteDatabase {
 }
 
 interface StagedBundle {
-  createSqliteFactory(installedPluginDirectory: string): {
+  createSqliteFactory(): {
     open(databasePath: string): Promise<StagedSqliteDatabase>;
   };
 }
@@ -40,6 +39,7 @@ function allowedExternal(specifier: string): boolean {
 
 function obsidianHostStub(): Record<string, unknown> {
   return {
+    AbstractInputSuggest: class {},
     FileSystemAdapter: class {},
     Notice: class {},
     Plugin: class {},
@@ -106,7 +106,7 @@ describe('release bundle', () => {
     const temporaryRoot = await mkdtemp(
       path.join(tmpdir(), 'obsidian-browser-sync-release-'),
     );
-    const releaseDirectory = path.join(temporaryRoot, 'obsidian-browser-sync');
+    const releaseDirectory = path.join(temporaryRoot, 'browser-history-sync');
 
     try {
       await mkdir(releaseDirectory);
@@ -126,11 +126,19 @@ describe('release bundle', () => {
       ));
       const versions = JSON.parse(await readFile('versions.json', 'utf8'));
       expect(manifest).toMatchObject({
-        id: 'obsidian-browser-sync',
+        id: 'browser-history-sync',
+        author: 'git-akihakune',
+        description: expect.any(String),
         isDesktopOnly: true,
         minAppVersion: '1.13.0',
       });
+      expect(manifest.description.trim().length).toBeGreaterThan(0);
       expect(versions[manifest.version]).toBe(manifest.minAppVersion);
+      const packageMetadata = JSON.parse(await readFile('package.json', 'utf8'));
+      expect(packageMetadata.license).toBe('MIT');
+      expect(await readFile('LICENSE', 'utf8')).toMatch(
+        /MIT License[\s\S]*git-akihakune/,
+      );
 
       const bundlePath = path.join(releaseDirectory, 'main.js');
       const bundle = await readFile(bundlePath, 'utf8');
@@ -143,7 +151,6 @@ describe('release bundle', () => {
       )).toEqual([]);
       expect(externalSpecifiers).not.toContain('sql.js');
       expect(bundle).not.toMatch(/node_modules[\\/]/);
-      expect(bundle).toContain('sql-wasm.wasm');
       expect(bundle).not.toContain('sql-wasm-browser.wasm');
 
       const fixtureRuntime = await initSqlJs({
@@ -163,7 +170,7 @@ describe('release bundle', () => {
       const stagedBundle = loadStagedBundle(bundlePath, bundle);
       expect(typeof stagedBundle.createSqliteFactory).toBe('function');
       const database = await stagedBundle
-        .createSqliteFactory(releaseDirectory)
+        .createSqliteFactory()
         .open(fixturePath);
       const rows = database.all(
         'SELECT id, value FROM release_check ORDER BY id',

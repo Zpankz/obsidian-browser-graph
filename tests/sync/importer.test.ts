@@ -15,6 +15,7 @@ import {
   fakeVaultWithRenderedVisit,
   type FakeVault,
 } from '../helpers/fake-vault';
+import { renderVisit } from '../../src/output/markdown';
 import { visit } from '../helpers/visits';
 
 const profile: BrowserProfile = {
@@ -43,8 +44,8 @@ function browserProfile(
 
 function persisted(overrides: Partial<PersistedData> = {}): PersistedData {
   const defaults: PersistedData = {
-    version: 2,
-    machineNamespace: 'a'.repeat(32),
+    version: 3,
+    deviceIdentityHash: 'a'.repeat(64),
     settings: {
       ...DEFAULT_SETTINGS,
       enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
@@ -158,6 +159,86 @@ it('recovers from missing cursor state by reading hidden markers', async () => {
 
   expect(result.imported).toBe(1);
   expect(result.alreadyPresent).toBe(1);
+});
+
+it('uses vault-wide markers across output folder, layout, period, timezone, and local path changes', async () => {
+  const original = normalized({
+    sourceKey: 'chrome:path-on-device-a',
+    profileId: 'Default',
+    sourceVisitId: '41',
+    visitedAt: new Date('2026-08-03T00:30:00Z'),
+  });
+  const moved = {
+    ...original,
+    sourceKey: 'chrome:path-on-device-b',
+  };
+  const preserved = `# User archive\n\nDo not rewrite me.\n\n${renderVisit(original)}`;
+  const vault = fakeVault({
+    files: {
+      'Old Output/2026/2026-08/2026-W32/2026-08-02.md': preserved,
+    },
+  });
+  const state = persisted({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+      outputFolder: 'New Output',
+      layout: 'flat',
+      period: 'year',
+    },
+  });
+
+  const result = await runImport(
+    { data: state },
+    deps({ vault, visits: [moved] }),
+  );
+
+  expect(result).toMatchObject({ imported: 0, alreadyPresent: 1 });
+  expect(vault.readText(
+    'Old Output/2026/2026-08/2026-W32/2026-08-02.md',
+  )).toBe(preserved);
+  expect(() => vault.readText('New Output/2026.md')).toThrow('Missing vault file');
+});
+
+it('does not treat markers in non-Markdown vault files as imported state', async () => {
+  const input = normalized({ sourceVisitId: '73' });
+  const vault = fakeVault({
+    files: {
+      'Attachments/browser-export.txt': renderVisit(input),
+    },
+  });
+
+  const result = await runImport(
+    { data: persisted() },
+    deps({ vault, visits: [input] }),
+  );
+
+  expect(result).toMatchObject({ imported: 1, alreadyPresent: 0 });
+});
+
+it('rechecks the destination immediately before append to catch a concurrently synced marker', async () => {
+  const input = normalized({ sourceVisitId: '74' });
+  const path = 'Browser History/2026/2026-08.md';
+  const vault = fakeVault({ files: { [path]: '# User note\n\n' } });
+  const read = vault.read.bind(vault);
+  let reads = 0;
+  vault.read = async (candidatePath) => {
+    const content = await read(candidatePath);
+    reads += 1;
+    if (reads === 1) {
+      await vault.append(candidatePath, renderVisit(input));
+    }
+    return content;
+  };
+
+  const result = await runImport(
+    { data: persisted() },
+    deps({ vault, visits: [input] }),
+  );
+
+  expect(reads).toBe(2);
+  expect(result).toMatchObject({ imported: 0, alreadyPresent: 1 });
+  expect(vault.readText(path).match(/obsidian-browser-sync/g)).toHaveLength(1);
 });
 
 it('rejects a second import while the shared run guard is active', async () => {
@@ -385,4 +466,82 @@ it('rolls back a cursor when persistence fails and recovers from the written mar
   expect(second.imported).toBe(0);
   expect(second.alreadyPresent).toBe(1);
   expect(state.cursors[profile.sourceKey]?.sourceVisitId).toBe('9');
+});
+
+it('advances timestamp and visit-ID cursor dimensions independently after clock correction', async () => {
+  const futureTimestamp = Date.parse('2026-08-03T13:00:00Z');
+  const state = persisted({
+    cursors: {
+      [profile.sourceKey]: {
+        visitedAtMs: futureTimestamp,
+        sourceVisitId: '7',
+      },
+    },
+  });
+  const corrected = normalized({
+    sourceVisitId: '8',
+    visitedAt: new Date('2026-08-03T10:00:00Z'),
+  });
+
+  await runImport({ data: state }, deps({ vault: fakeVault(), visits: [corrected] }));
+
+  expect(state.cursors[profile.sourceKey]).toEqual({
+    visitedAtMs: futureTimestamp,
+    sourceVisitId: '8',
+  });
+});
+
+it('uses one immutable settings snapshot for an entire deferred import', async () => {
+  const chrome = browserProfile('chrome:original', {
+    browserId: 'chrome',
+    profileId: 'Default',
+  });
+  const firefox = browserProfile('firefox:next', {
+    browserId: 'firefox',
+    browserName: 'Firefox',
+    profileId: 'work.default',
+    readerKind: 'firefox',
+  });
+  const state = persisted();
+  state.settings.enabledBrowsers.firefox = false;
+  let releaseDiscovery!: (profiles: BrowserProfile[]) => void;
+  const discovery = new Promise<BrowserProfile[]>((resolve) => {
+    releaseDiscovery = resolve;
+  });
+  const vault = fakeVault();
+  const reads: string[] = [];
+  const dependencies: ImportDependencies = {
+    discover: () => discovery,
+    readVisits: async (candidate) => {
+      reads.push(candidate.sourceKey);
+      return [normalizedFor(candidate, {
+        sourceVisitId: candidate.browserId === 'chrome' ? '101' : '202',
+        title: candidate.browserId === 'chrome' ? 'Original settings' : 'Next settings',
+      })];
+    },
+    vault,
+    saveData: async () => {},
+  };
+
+  const active = runImport({ data: state }, dependencies);
+  state.settings.enabledBrowsers.chrome = false;
+  state.settings.enabledBrowsers.firefox = true;
+  state.settings.outputFolder = 'Next History';
+  state.settings.layout = 'flat';
+  state.settings.period = 'day';
+  releaseDiscovery([chrome, firefox]);
+  await active;
+
+  expect(reads).toEqual([chrome.sourceKey]);
+  expect(vault.readText('Browser History/2026/2026-08.md'))
+    .toContain('Original settings');
+
+  await runImport({ data: state }, {
+    ...dependencies,
+    discover: async () => [chrome, firefox],
+  });
+
+  expect(reads).toEqual([chrome.sourceKey, firefox.sourceKey]);
+  expect(vault.readText('Next History/2026-08-03.md'))
+    .toContain('Next settings');
 });

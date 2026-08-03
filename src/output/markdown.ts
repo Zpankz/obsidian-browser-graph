@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { NormalizedVisit } from '../domain';
 
-const MARKER = /<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->/g;
+const MARKER_LINE = /^ {0,3}<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->[ ]*$/;
 
 function localTime(date: Date): string {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
@@ -19,14 +19,26 @@ function replaceControlCharacters(value: string, replacement: string): string {
 }
 
 function safeTitle(title: string): string {
-  return safeLabel(title)
-    .replace(/\\/g, '\\\\')
-    .replace(/\[/g, '\\[')
-    .replace(/\]/g, '\\]');
+  return safeLabel(title);
 }
 
 function safeLabel(label: string): string {
-  return replaceControlCharacters(label, ' ').replace(/\s+/g, ' ').trim();
+  return escapeMarkdownInline(escapeHtml(
+    replaceControlCharacters(label, ' ').replace(/\s+/g, ' ').trim(),
+  ));
+}
+
+function escapeMarkdownInline(value: string): string {
+  return value.replace(/([\\`*_[\]{}()!])/g, '\\$1');
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function escapeMarkdownDestination(url: string): string {
@@ -42,13 +54,40 @@ function escapeMarkdownDestination(url: string): string {
   return Array.from(url, (character) => encodedDelimiters[character] ?? character).join('');
 }
 
-function safeUrl(url: string): string {
+function inertCodeSpan(value: string): string {
+  const text = replaceControlCharacters(value, ' ').replace(/\s+/g, ' ').trim();
+  const longestBacktickRun = [...text.matchAll(/`+/g)].reduce(
+    (longest, match) => Math.max(longest, match[0].length),
+    0,
+  );
+  const delimiter = '`'.repeat(longestBacktickRun + 1);
+  const content = text || 'invalid URL';
+  const padded = content.startsWith('`') || content.endsWith('`')
+    ? ` ${content} `
+    : content;
+  return `${delimiter}${padded}${delimiter}`;
+}
+
+interface SafeUrl {
+  clickable: boolean;
+  destination?: string;
+  display: string;
+}
+
+function safeUrl(url: string): SafeUrl {
   try {
-    return escapeMarkdownDestination(new URL(url).toString());
+    const normalized = new URL(url);
+    if (normalized.protocol !== 'http:' && normalized.protocol !== 'https:') {
+      return { clickable: false, display: inertCodeSpan(url) };
+    }
+    const destination = escapeMarkdownDestination(normalized.toString());
+    return {
+      clickable: true,
+      destination,
+      display: safeTitle(normalized.toString()),
+    };
   } catch {
-    return escapeMarkdownDestination(
-      replaceControlCharacters(url, ' ').replace(/\s/g, encodeURIComponent),
-    );
+    return { clickable: false, display: inertCodeSpan(url) };
   }
 }
 
@@ -56,7 +95,8 @@ export function stableVisitId(visit: NormalizedVisit): string {
   return createHash('sha256')
     .update(
       [
-        visit.sourceKey,
+        visit.browserId,
+        visit.profileId,
         visit.sourceVisitId,
         visit.visitedAt.toISOString(),
         visit.url,
@@ -68,20 +108,45 @@ export function stableVisitId(visit: NormalizedVisit): string {
 
 export function renderVisit(visit: NormalizedVisit): string {
   const url = safeUrl(visit.url);
-  const title = safeTitle(visit.title) || url;
+  const title = safeTitle(visit.title) || url.display || 'Untitled visit';
+  const visibleVisit = url.clickable
+    ? `[${title}](${url.destination})`
+    : title === url.display || url.display.length === 0
+      ? title
+      : `${title} — ${url.display}`;
   const markerSource = visit.browserId;
   const browserName = safeLabel(visit.browserName);
   const profileName = safeLabel(visit.profileName);
-  return `- ${localTime(visit.visitedAt)} [${title}](${url}) — ${browserName} / ${profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
+  return `- ${localTime(visit.visitedAt)} ${visibleVisit} — ${browserName} / ${profileName}\n  <!-- obsidian-browser-sync:${markerSource}:${stableVisitId(visit)} -->\n`;
 }
 
 export function extractImportedIds(markdown: string): Set<string> {
   const importedIds = new Set<string>();
-  MARKER.lastIndex = 0;
-  let match = MARKER.exec(markdown);
-  while (match !== null) {
-    importedIds.add(match[2]);
-    match = MARKER.exec(markdown);
+  let fence: { character: '`' | '~'; length: number } | undefined;
+  for (const line of markdown.split(/\r?\n/)) {
+    if (fence) {
+      const closingFence = new RegExp(
+        `^ {0,3}${fence.character}{${fence.length},}[ ]*$`,
+      );
+      if (closingFence.test(line)) {
+        fence = undefined;
+      }
+      continue;
+    }
+
+    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (openingFence) {
+      fence = {
+        character: openingFence[1][0] as '`' | '~',
+        length: openingFence[1].length,
+      };
+      continue;
+    }
+
+    const marker = MARKER_LINE.exec(line);
+    if (marker) {
+      importedIds.add(marker[2]);
+    }
   }
   return importedIds;
 }

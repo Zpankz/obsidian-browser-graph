@@ -23,8 +23,8 @@ export interface ProfileCursor {
 }
 
 export interface PersistedData {
-  version: 2;
-  machineNamespace: string;
+  version: 3;
+  deviceIdentityHash: string;
   settings: PluginSettings;
   cursors: Record<string, ProfileCursor>;
 }
@@ -60,4 +60,5 @@ export interface VaultPort {
   create(path: string, content: string): Promise<void>;
   append(path: string, content: string): Promise<void>;
   ensureFolder(path: string): Promise<void>;
+  scanMarkdownFiles(visit: (markdown: string) => void): Promise<void>;
 }

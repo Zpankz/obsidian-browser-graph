@@ -3,6 +3,7 @@ import type {
   ImportSummary,
   NormalizedVisit,
   PersistedData,
+  PluginSettings,
   ProfileCursor,
   VaultPort,
 } from '../domain';
@@ -26,6 +27,7 @@ export interface ImportDependencies {
 
 export interface ImportRequest {
   data: PersistedData;
+  settings?: PluginSettings;
 }
 
 export class ImportAlreadyRunningError extends Error {
@@ -46,8 +48,9 @@ export async function runImport(
   }
 
   importRunning = true;
+  const settings = cloneSettings(request.settings ?? request.data.settings);
   try {
-    return await performImport(request, dependencies);
+    return await performImport(request, dependencies, settings);
   } finally {
     importRunning = false;
   }
@@ -72,6 +75,7 @@ interface DestinationGroup {
 async function performImport(
   request: ImportRequest,
   dependencies: ImportDependencies,
+  settings: PluginSettings,
 ): Promise<ImportSummary> {
   const summary: ImportSummary = {
     imported: 0,
@@ -79,9 +83,10 @@ async function performImport(
     skippedProfiles: 0,
     failedProfiles: [],
   };
+  const managedIds = await readManagedMarkerIndex(dependencies.vault);
   const profiles = await dependencies.discover();
   const enabledProfiles = profiles.filter((profile) => {
-    const enabled = request.data.settings.enabledBrowsers[profile.browserId];
+    const enabled = settings.enabledBrowsers[profile.browserId];
     if (!enabled) {
       summary.skippedProfiles += 1;
     }
@@ -107,7 +112,7 @@ async function performImport(
   const successfulReads = readResults.filter(
     (result): result is ProfileResult => result !== undefined,
   );
-  const groups = groupDestinations(successfulReads, request.data);
+  const groups = groupDestinations(successfulReads, settings);
   const failedProfileWrites = new Map<string, string>();
 
   for (const [path, group] of sortedGroups(groups)) {
@@ -116,22 +121,50 @@ async function performImport(
     );
     try {
       const existing = await readExisting(dependencies.vault, path);
-      const importedIds = extractImportedIds(existing ?? '');
-      const entries: string[] = [];
+      for (const id of extractImportedIds(existing ?? '')) {
+        managedIds.add(id);
+      }
+      const pending: Candidate[] = [];
+      const pendingIds = new Set<string>();
       contributors = new Set<string>();
       for (const candidate of group.candidates) {
-        if (importedIds.has(candidate.id)) {
+        if (managedIds.has(candidate.id) || pendingIds.has(candidate.id)) {
           summary.alreadyPresent += 1;
           continue;
         }
-        importedIds.add(candidate.id);
+        pendingIds.add(candidate.id);
         contributors.add(candidate.owner.profile.sourceKey);
-        entries.push(renderVisit(candidate.visit));
+        pending.push(candidate);
       }
 
-      if (entries.length > 0) {
-        await appendEntries(dependencies.vault, path, group.label, existing, entries);
-        summary.imported += entries.length;
+      if (pending.length > 0) {
+        const latestExisting = await readExisting(dependencies.vault, path);
+        for (const id of extractImportedIds(latestExisting ?? '')) {
+          managedIds.add(id);
+        }
+        const appendable = pending.filter((candidate) => {
+          if (managedIds.has(candidate.id)) {
+            summary.alreadyPresent += 1;
+            return false;
+          }
+          return true;
+        });
+        contributors = new Set(
+          appendable.map((candidate) => candidate.owner.profile.sourceKey),
+        );
+        if (appendable.length > 0) {
+          await appendEntries(
+            dependencies.vault,
+            path,
+            group.label,
+            latestExisting,
+            appendable.map((candidate) => renderVisit(candidate.visit)),
+          );
+          for (const candidate of appendable) {
+            managedIds.add(candidate.id);
+          }
+          summary.imported += appendable.length;
+        }
       }
     } catch (error) {
       const message = errorMessage(error);
@@ -179,14 +212,14 @@ async function performImport(
 
 function groupDestinations(
   profiles: ProfileResult[],
-  data: PersistedData,
+  settings: PluginSettings,
 ): Map<string, DestinationGroup> {
   const groups = new Map<string, DestinationGroup>();
   for (const owner of profiles) {
     for (const candidate of owner.visits) {
-      const path = destinationPath(data.settings, candidate.visitedAt);
+      const path = destinationPath(settings, candidate.visitedAt);
       const group = groups.get(path) ?? {
-        label: periodFor(candidate.visitedAt, data.settings.period).label,
+        label: periodFor(candidate.visitedAt, settings.period).label,
         candidates: [],
       };
       group.candidates.push({
@@ -219,6 +252,16 @@ async function readExisting(vault: VaultPort, path: string): Promise<string | un
   return await vault.exists(path) ? vault.read(path) : undefined;
 }
 
+async function readManagedMarkerIndex(vault: VaultPort): Promise<Set<string>> {
+  const importedIds = new Set<string>();
+  await vault.scanMarkdownFiles((content) => {
+    for (const id of extractImportedIds(content)) {
+      importedIds.add(id);
+    }
+  });
+  return importedIds;
+}
+
 async function appendEntries(
   vault: VaultPort,
   path: string,
@@ -243,17 +286,23 @@ function newestCursor(
   visits: NormalizedVisit[],
   current?: ProfileCursor,
 ): ProfileCursor | undefined {
-  let newest = current;
+  let visitedAtMs = current?.visitedAtMs;
+  let sourceVisitId = current?.sourceVisitId;
   for (const visit of visits) {
-    const candidate = {
-      visitedAtMs: visit.visitedAt.getTime(),
-      sourceVisitId: visit.sourceVisitId,
-    };
-    if (!newest || compareCursors(newest, candidate) < 0) {
-      newest = candidate;
+    const timestamp = visit.visitedAt.getTime();
+    if (visitedAtMs === undefined || timestamp > visitedAtMs) {
+      visitedAtMs = timestamp;
+    }
+    if (
+      sourceVisitId === undefined
+      || compareSourceVisitIds(sourceVisitId, visit.sourceVisitId) < 0
+    ) {
+      sourceVisitId = visit.sourceVisitId;
     }
   }
-  return newest;
+  return visitedAtMs === undefined || sourceVisitId === undefined
+    ? undefined
+    : { visitedAtMs, sourceVisitId };
 }
 
 function sameCursor(
@@ -264,16 +313,18 @@ function sameCursor(
     && left.sourceVisitId === right.sourceVisitId;
 }
 
-function compareCursors(left: ProfileCursor, right: ProfileCursor): number {
-  const timeOrder = left.visitedAtMs - right.visitedAtMs;
-  return timeOrder || compareSourceVisitIds(left.sourceVisitId, right.sourceVisitId);
-}
-
 function compareSourceVisitIds(left: string, right: string): number {
   if (/^-?\d+$/.test(left) && /^-?\d+$/.test(right)) {
     return compareIntegerStrings(left, right);
   }
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function cloneSettings(settings: PluginSettings): PluginSettings {
+  return {
+    ...settings,
+    enabledBrowsers: { ...settings.enabledBrowsers },
+  };
 }
 
 function compareIntegerStrings(left: string, right: string): number {

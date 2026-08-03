@@ -71,6 +71,50 @@ describe('FirefoxReader', () => {
     db.close();
   });
 
+  it('recovers a higher visit ID even when its corrected timestamp predates the overlap', async () => {
+    const db = await firefoxFixture([
+      { id: 6, placeId: 1, visitDate: firefoxMicros('2026-08-03T09:00:00Z') },
+      { id: 8, placeId: 1, visitDate: firefoxMicros('2026-08-03T09:00:00Z') },
+    ]);
+
+    const visits = new FirefoxReader().read(db, firefoxProfile(), {
+      visitedAtMs: Date.parse('2026-08-03T10:05:00Z'),
+      sourceVisitId: '7',
+    });
+
+    expect(visits.map((item) => item.sourceVisitId)).toEqual(['8']);
+    db.close();
+  });
+
+  it('skips corrupt timestamps without discarding healthy rows', async () => {
+    const now = Date.parse('2026-08-03T12:00:00Z');
+    const db = await firefoxFixture([
+      { id: 1, placeId: 1, visitDate: -1_000 },
+      { id: 2, placeId: 1, visitDate: firefoxMicros('2030-01-01T00:00:00Z') },
+      { id: 3, placeId: 1, visitDate: firefoxMicros('2026-08-03T10:00:00Z') },
+    ]);
+
+    expect(new FirefoxReader(() => now).read(db, firefoxProfile())
+      .map((item) => item.sourceVisitId)).toEqual(['3']);
+    db.close();
+  });
+
+  it('keeps valid microseconds below Date precision and rejects NULL timestamps', async () => {
+    const db = await sqliteFixture([
+      'CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT)',
+      'CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, place_id INTEGER, visit_date)',
+      "INSERT INTO moz_places VALUES (1, 'https://example.com', 'Example')",
+    ]);
+    db.run('INSERT INTO moz_historyvisits VALUES (1, 1, :time)', {
+      ':time': firefoxMicros('2026-08-03T10:00:00Z') + 123,
+    });
+    db.run('INSERT INTO moz_historyvisits VALUES (2, 1, NULL)');
+
+    expect(new FirefoxReader(() => Date.parse('2026-08-04T00:00:00Z'))
+      .read(db, firefoxProfile()).map((item) => item.sourceVisitId)).toEqual(['1']);
+    db.close();
+  });
+
   it('rejects a missing required column with a clear schema error', async () => {
     const db = await sqliteFixture([
       'CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT)',

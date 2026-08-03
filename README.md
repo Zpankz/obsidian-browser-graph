@@ -23,10 +23,14 @@ Compatible Chromium browsers are read when their local history schema matches Ch
 
 ## Install
 
+### From Community Plugins
+
+When the plugin is available in the Obsidian Community Plugins catalog, search for **Browser Sync**, install it, and enable it. The stable Community plugin ID is `browser-history-sync`.
+
 ### From a release
 
-1. Create `<vault>/.obsidian/plugins/obsidian-browser-sync/`.
-2. Copy these four release files into that directory: `main.js`, `manifest.json`, `styles.css`, and `sql-wasm.wasm`.
+1. Create `<vault>/.obsidian/plugins/browser-history-sync/`.
+2. Copy `main.js`, `manifest.json`, and `styles.css` into that directory. No other runtime file is required.
 3. Restart Obsidian, or reload the app without saving.
 4. Open **Settings → Community plugins** and enable **Browser Sync**.
 
@@ -41,7 +45,7 @@ npm run build
 npm run test:release
 ```
 
-`npm test` is artifact-independent and succeeds before a build. `npm run test:release` runs only after the build and stages the exact four-file release in an isolated temporary directory for verification. Copy the same four generated release files listed above into `<vault>/.obsidian/plugins/obsidian-browser-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin.
+`npm test` is artifact-independent and succeeds before a build. `npm run test:release` runs only after the build and stages the exact three-file Community release in an isolated temporary directory for verification. Copy the same three release files listed above into `<vault>/.obsidian/plugins/browser-history-sync/`. Development dependencies remain in the source checkout; they are not part of the installed plugin. The production `sql.js` WebAssembly bytes are embedded in generated `main.js` at build time.
 
 ## Use
 
@@ -56,7 +60,7 @@ The plugin discovers all profiles for every enabled browser and writes a separat
 The settings page provides:
 
 - A toggle for Safari, Firefox, Google Chrome, Microsoft Edge, Brave, Chromium, and Vivaldi. Sources default to enabled; unavailable or undetected sources are skipped.
-- A vault-relative output folder. The default is `Browser History`. Absolute paths, parent traversal, and destinations inside `.obsidian` are rejected.
+- A vault-relative output folder with suggestions from existing vault folders. The default is `Browser History`. Absolute and drive-relative paths, parent traversal, `.obsidian` aliases, Windows reserved names/characters, and components with trailing dots or spaces are rejected on every platform.
 - A **Flat** or **Tiered** layout. The default is **Tiered**.
 - A **Day**, **ISO week**, **Month**, or **Year** note period. The default is **Month**.
 - A read-only list of detected profiles and their availability or permission status.
@@ -96,11 +100,13 @@ Dates, times, and filenames use the local timezone of the Obsidian desktop envir
 
 ## Idempotency and state
 
-Each imported entry is followed by a hidden `obsidian-browser-sync` marker containing a deterministic visit ID. These markers are the final deduplication authority, so running the command twice without new history adds nothing. New visits extend only their applicable notes.
+Each imported entry is followed by a hidden `obsidian-browser-sync` marker containing a deterministic, path-independent visit ID. The marker namespace is retained for compatibility even though the Community plugin ID is `browser-history-sync`. The plugin indexes managed markers across all Markdown files in the vault, so these markers remain the final deduplication authority after a change to the output folder, layout, period, timezone, or local browser-profile path. Running the command twice without new history adds nothing, and existing notes or user-authored content are never moved or rewritten.
 
-The plugin also saves a high-water cursor for each stable browser profile in its `data.json`. Cursor state is machine-specific and should not be treated as portable vault content. The saved state contains a privacy-preserving hash namespace derived from local machine identity; it never stores the raw hostname or home-directory value used to derive that hash.
+The plugin also saves a timestamp and source-visit-ID high-water cursor for each local browser profile in version 3 of its `data.json`. Cursor state is device-specific and should not be treated as portable vault content. A random per-device token is stored outside the synced vault in Obsidian/Electron local storage; only its SHA-256 hash is written to `data.json`.
 
-If state is deleted or omitted from Git, the next import rescans from the beginning. If `data.json` is copied to another machine—even one where a browser profile has the same path—the namespace mismatch invalidates the copied cursors and safely triggers the same full rescan. Existing hidden markers remain machine-independent and prevent duplicate entries. Keep the markers in generated notes if you edit them.
+If state is deleted or omitted from Git, the local device token is cleared, or the saved hash does not match, the next import invalidates cursors and rescans from the beginning. Copying `data.json` to another device is rejected even when both devices report identical platform, hostname, home-directory, and browser paths. Existing hidden markers remain device-independent and prevent duplicate entries. Keep the markers in generated notes if you edit them.
+
+Each import uses an immutable snapshot of the settings that were active when the command was invoked. Settings changed while an import is running apply only to the next run.
 
 ## Safari permission and retry guidance
 
@@ -115,13 +121,13 @@ The plugin reads a temporary snapshot rather than opening the live browser datab
 
 ## Privacy
 
-All processing stays on the local machine. The plugin makes no network requests, opens browser databases read-only, never writes to or deletes browser data, and removes temporary database snapshots after each profile attempt. It writes only generated Markdown under the configured vault folder plus settings and machine-specific cursor state in the plugin's own `data.json`.
+All processing stays on the local machine. The plugin makes no network requests, opens browser databases read-only, never writes to or deletes browser data, and removes temporary database snapshots after each profile attempt. A cleanup failure is reported explicitly because a sensitive temporary snapshot may remain. The plugin writes generated Markdown under the configured vault folder, settings and a device-identity hash in its `data.json`, and the raw random device token only in local application storage outside the vault.
 
-Browser titles and URLs are treated as untrusted text and escaped before insertion into Markdown. Visits not persisted by a browser, such as most private or incognito activity, are unavailable to the plugin.
+Browser titles, URLs, browser names, and profile labels are treated as untrusted text and escaped before insertion into Markdown. Only `http:` and `https:` destinations become links; other schemes and malformed URLs remain inert text. Corrupt, negative, unrepresentable, or implausibly future timestamps are skipped at the profile-reader boundary. Visits not persisted by a browser, such as most private or incognito activity, are unavailable to the plugin.
 
 ## Git-controlled vaults
 
-The release includes `sql-wasm.wasm`, an approximately 660 kB uncompressed binary stored only in `.obsidian/plugins/obsidian-browser-sync/`; it is never copied into the history output folder. For a Git-controlled vault, either ignore the installed plugin directory/artifacts or intentionally accept this binary blob in the repository. Generated browser history is ordinary Markdown and can be reviewed, diffed, and versioned normally. Consider excluding the plugin's machine-specific `data.json` while retaining the hidden markers in history notes.
+The release has no separate WASM sidecar: the production `sql.js` WebAssembly bytes are embedded in `.obsidian/plugins/browser-history-sync/main.js`. For a Git-controlled vault, either ignore the installed plugin directory or intentionally version the three Community release files. Generated browser history is ordinary Markdown and can be reviewed, diffed, and versioned normally. Consider excluding the plugin's device-specific `data.json` while retaining the hidden markers in history notes.
 
 ## Development verification
 

@@ -4,6 +4,7 @@ import {
   CURSOR_OVERLAP_MS,
   type BrowserHistoryReader,
   normalizeVisit,
+  presentVisits,
   sortVisits,
   validateSchema,
 } from './reader';
@@ -14,10 +15,12 @@ interface ChromiumVisitRow extends Record<string, unknown> {
   sourceVisitId: number | string;
   title: string | null;
   url: string;
-  visitTime: number;
+  visitTime: unknown;
 }
 
 export class ChromiumReader implements BrowserHistoryReader {
+  constructor(private readonly now: () => number = Date.now) {}
+
   read(
     db: SqliteDatabase,
     profile: BrowserProfile,
@@ -38,15 +41,25 @@ export class ChromiumReader implements BrowserHistoryReader {
              urls.url AS url
       FROM visits
       INNER JOIN urls ON urls.id = visits.url
-      ${since === undefined ? '' : 'WHERE visits.visit_time >= :since'}
-    `, since === undefined ? undefined : { ':since': since });
+      ${since === undefined ? '' : `WHERE (
+        visits.visit_time >= :since
+        OR visits.id > CAST(:sourceVisitId AS INTEGER)
+      )`}
+      ORDER BY visits.visit_time ASC, visits.id ASC
+    `, since === undefined ? undefined : {
+      ':since': since,
+      ':sourceVisitId': cursor?.sourceVisitId ?? '0',
+    });
 
-    return sortVisits(rows.map((row) => normalizeVisit(
+    return sortVisits(presentVisits(rows.map((row) => normalizeVisit(
       profile,
       row.sourceVisitId,
-      (Number(row.visitTime) - CHROMIUM_EPOCH_OFFSET_MICROS) / 1_000,
+      typeof row.visitTime === 'number'
+        ? (row.visitTime - CHROMIUM_EPOCH_OFFSET_MICROS) / 1_000
+        : Number.NaN,
       row.title,
       row.url,
-    )));
+      this.now(),
+    ))));
   }
 }

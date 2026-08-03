@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type {
   BrowserId,
   NotePeriod,
@@ -7,6 +6,14 @@ import type {
   PluginSettings,
   ProfileCursor,
 } from './domain';
+import {
+  hashDeviceIdentityToken,
+  resolveDeviceIdentity,
+} from './device-identity';
+import { isSafeVisitTimestamp } from './browsers/reader';
+import { normalizeSafeVaultPath } from './vault-path';
+
+export { hashDeviceIdentityToken, resolveDeviceIdentity };
 
 const browserIds: readonly BrowserId[] = [
   'safari',
@@ -20,24 +27,8 @@ const browserIds: readonly BrowserId[] = [
 
 const notePeriods: readonly NotePeriod[] = ['day', 'week', 'month', 'year'];
 const outputLayouts: readonly OutputLayout[] = ['flat', 'tiered'];
-const MACHINE_NAMESPACE = /^[a-f0-9]{32}$/;
-
-export interface LocalMachineIdentity {
-  platform: string;
-  hostname: string;
-  homeDir: string;
-}
-
-export function deriveMachineNamespace(identity: LocalMachineIdentity): string {
-  return createHash('sha256')
-    .update([
-      identity.platform,
-      identity.hostname,
-      identity.homeDir,
-    ].join('\0'))
-    .digest('hex')
-    .slice(0, 32);
-}
+const DEVICE_IDENTITY_HASH = /^[a-f0-9]{64}$/;
+const MAX_SQLITE_VISIT_ID = '9223372036854775807';
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   enabledBrowsers: {
@@ -59,26 +50,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizedVaultFolder(value: string): string | null {
-  const candidate = value.trim().replace(/\\/g, '/');
-
-  if (/^(?:\/|[A-Za-z]:\/)/.test(candidate)) {
-    return null;
-  }
-
-  const parts = candidate.split('/');
-  if (parts.some((part) => part === '..')) {
-    return null;
-  }
-
-  const normalizedParts = parts.filter((part) => part.length > 0 && part !== '.');
-  if (
-    normalizedParts.length === 0 ||
-    normalizedParts[0].toLowerCase() === '.obsidian'
-  ) {
-    return null;
-  }
-
-  return normalizedParts.join('/');
+  return normalizeSafeVaultPath(value);
 }
 
 export function isSafeVaultFolder(value: unknown): value is string {
@@ -128,7 +100,10 @@ function migrateSettings(value: unknown): PluginSettings {
   };
 }
 
-function migrateCursors(value: unknown): Record<string, ProfileCursor> {
+function migrateCursors(
+  value: unknown,
+  nowMs: number,
+): Record<string, ProfileCursor> {
   if (!isRecord(value)) {
     return {};
   }
@@ -137,9 +112,10 @@ function migrateCursors(value: unknown): Record<string, ProfileCursor> {
   for (const [sourceKey, cursor] of Object.entries(value)) {
     if (
       !isRecord(cursor) ||
-      typeof cursor.visitedAtMs !== 'number' ||
-      !Number.isFinite(cursor.visitedAtMs) ||
-      typeof cursor.sourceVisitId !== 'string'
+      !isSafeVisitTimestamp(cursor.visitedAtMs, nowMs) ||
+      !Number.isSafeInteger(cursor.visitedAtMs) ||
+      typeof cursor.sourceVisitId !== 'string' ||
+      !isSafeSourceVisitId(cursor.sourceVisitId)
     ) {
       continue;
     }
@@ -153,21 +129,31 @@ function migrateCursors(value: unknown): Record<string, ProfileCursor> {
   return cursors;
 }
 
+function isSafeSourceVisitId(value: string): boolean {
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    return false;
+  }
+  return value.length < MAX_SQLITE_VISIT_ID.length
+    || (value.length === MAX_SQLITE_VISIT_ID.length
+      && value <= MAX_SQLITE_VISIT_ID);
+}
+
 export function migratePersistedData(
   raw: unknown,
-  currentMachineNamespace: string,
+  currentDeviceIdentityHash: string,
+  nowMs = Date.now(),
 ): PersistedData {
-  if (!MACHINE_NAMESPACE.test(currentMachineNamespace)) {
-    throw new Error('Browser Sync requires a hashed local machine namespace.');
+  if (!DEVICE_IDENTITY_HASH.test(currentDeviceIdentityHash)) {
+    throw new Error('Browser Sync requires a hashed local device identity.');
   }
   const data = isRecord(raw) ? raw : {};
-  const cursorsBelongToThisMachine = data.version === 2
-    && data.machineNamespace === currentMachineNamespace;
+  const cursorsBelongToThisDevice = data.version === 3
+    && data.deviceIdentityHash === currentDeviceIdentityHash;
 
   return {
-    version: 2,
-    machineNamespace: currentMachineNamespace,
+    version: 3,
+    deviceIdentityHash: currentDeviceIdentityHash,
     settings: migrateSettings(data.settings),
-    cursors: cursorsBelongToThisMachine ? migrateCursors(data.cursors) : {},
+    cursors: cursorsBelongToThisDevice ? migrateCursors(data.cursors, nowMs) : {},
   };
 }

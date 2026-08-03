@@ -59,4 +59,52 @@ describe('withDatabaseSnapshot', () => {
 
     expect(temp.removed).toEqual(['/tmp/browser-sync-run']);
   });
+
+  it('preserves both the primary operation error and a cleanup failure', async () => {
+    const temp = fakeTempFiles();
+    const operationError = new Error('reader failed first');
+    const cleanupError = new Error('permission denied during cleanup');
+    temp.rm = async () => {
+      throw cleanupError;
+    };
+
+    let failure: unknown;
+    try {
+      await withDatabaseSnapshot('/browser/History', temp, async () => {
+        throw operationError;
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('reader failed first');
+    expect(failure).toMatchObject({
+      cause: operationError,
+      cleanupError,
+    });
+  });
+
+  it('reports cleanup-only failure as a sensitive snapshot that may remain', async () => {
+    const temp = fakeTempFiles();
+    const cleanupError = new Error('cleanup denied');
+    temp.rm = async () => {
+      throw cleanupError;
+    };
+
+    let failure: unknown;
+    try {
+      await withDatabaseSnapshot('/browser/History', temp, async () => 'read');
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/sensitive.*may remain/i);
+    expect((failure as Error).message).toContain('/tmp/browser-sync-run');
+    expect(failure).toMatchObject({
+      cause: cleanupError,
+      cleanupError,
+    });
+  });
 });
