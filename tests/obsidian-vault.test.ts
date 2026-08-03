@@ -24,6 +24,7 @@ import { ObsidianVaultPort } from '../src/obsidian-vault';
 
 interface FakeObsidianVault extends Pick<
   Vault,
+  | 'configDir'
   | 'getAbstractFileByPath'
   | 'createFolder'
   | 'create'
@@ -43,6 +44,7 @@ function fakeObsidianVault(): FakeObsidianVault {
   const files = new Map<string, TFile | TFolder>();
   const contents = new Map<string, string>();
   const api: FakeObsidianVault = {
+    configDir: '.obsidian',
     createdFolders: [],
     createdFiles: [],
     appendedFiles: [],

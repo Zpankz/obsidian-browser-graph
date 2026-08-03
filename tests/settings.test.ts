@@ -158,11 +158,16 @@ describe('isSafeVaultFolder', () => {
     '.obsidian ',
     '.obsidian./plugins',
   ])('rejects Windows-unsafe or config-alias folder %s on every host', (folder) => {
-    expect(isSafeVaultFolder(folder)).toBe(false);
+    expect(isSafeVaultFolder(folder, '.obsidian')).toBe(false);
   });
 
   it('keeps ordinary portable vault folders valid', () => {
     expect(isSafeVaultFolder('History/Imported Notes')).toBe(true);
     expect(isSafeVaultFolder('History\\Imported Notes')).toBe(true);
+  });
+
+  it('uses the vault configuration folder instead of assuming its name', () => {
+    expect(isSafeVaultFolder('.settings/plugins', '.settings')).toBe(false);
+    expect(isSafeVaultFolder('.obsidian/notes', '.settings')).toBe(true);
   });
 });

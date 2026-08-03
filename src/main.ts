@@ -86,6 +86,8 @@ export default class BrowserSyncPlugin extends Plugin {
     const loaded = migratePersistedData(
       await this.loadData(),
       deviceIdentityHash,
+      Date.now(),
+      this.app.vault.configDir,
     );
     this.data = clonePersistedData(loaded);
     this.committedData = clonePersistedData(loaded);
@@ -107,7 +109,7 @@ export default class BrowserSyncPlugin extends Plugin {
     settings: PluginSettings,
     changedFields: readonly PluginSettingField[],
   ): Promise<void> {
-    if (!validSettings(settings)) {
+    if (!validSettings(settings, this.app.vault.configDir)) {
       return Promise.reject(new Error(
         'Browser Sync settings require a safe vault-relative output folder and supported options.',
       ));
@@ -121,8 +123,8 @@ export default class BrowserSyncPlugin extends Plugin {
         deviceIdentityHash: this.committedData.deviceIdentityHash,
         settings: composed,
         cursors: this.committedData.cursors,
-      }, this.committedData.deviceIdentityHash).settings;
-      if (!validSettings(normalized)) {
+      }, this.committedData.deviceIdentityHash, Date.now(), this.app.vault.configDir).settings;
+      if (!validSettings(normalized, this.app.vault.configDir)) {
         throw new Error('Browser Sync settings changed to an unsupported value.');
       }
 
@@ -147,7 +149,7 @@ export default class BrowserSyncPlugin extends Plugin {
   async importBrowserHistory(rebuild = false): Promise<void> {
     const runtime = this.requireRuntime();
     const settings = cloneSettings(this.data.settings);
-    if (!validSettings(settings)) {
+    if (!validSettings(settings, this.app.vault.configDir)) {
       runtime.notice(
         'Browser history import could not start. Choose a valid vault-relative output folder in Browser Sync settings.',
       );
@@ -351,8 +353,8 @@ function currentPlatform(): DiscoveryPlatform {
   return 'linux';
 }
 
-function validSettings(settings: PluginSettings): boolean {
-  return isSafeVaultFolder(settings.outputFolder)
+function validSettings(settings: PluginSettings, configDir: string): boolean {
+  return isSafeVaultFolder(settings.outputFolder, configDir)
     && (settings.layout === 'flat' || settings.layout === 'tiered')
     && ['day', 'week', 'month', 'year'].includes(settings.period)
     && BROWSER_CATALOG.every(

@@ -43,6 +43,116 @@ vi.mock('obsidian', () => {
     ) {
       this.containerEl = { empty() {} };
     }
+
+    display() {
+      const tab = this as unknown as {
+        app: { vault: { getAllLoadedFiles(): unknown[] } };
+        getControlValue(key: string): unknown;
+        setControlValue(key: string, next: unknown): Promise<void>;
+      };
+      const definitions = (this as unknown as {
+        getSettingDefinitions(): Array<Record<string, unknown>>;
+      }).getSettingDefinitions();
+      const renderItems = (items: Array<Record<string, unknown>>) => {
+        for (const item of items) {
+          if (item.type === 'group') {
+            renderItems(item.items as Array<Record<string, unknown>>);
+            continue;
+          }
+          const setting = new Setting(this.containerEl)
+            .setName(item.name as string);
+          if (typeof item.desc === 'string') {
+            setting.setDesc(item.desc);
+          }
+          if (typeof item.render === 'function') {
+            item.render(setting, {
+              listEl: this.containerEl,
+              addSetting: (callback: (row: Setting) => void) => {
+                callback(new Setting(this.containerEl));
+              },
+            });
+            continue;
+          }
+          const control = item.control as Record<string, unknown>;
+          const save = async (value: unknown) => {
+            const validation = typeof control.validate === 'function'
+              ? await control.validate(value)
+              : undefined;
+            if (typeof validation === 'string' && validation.length > 0) {
+              setting.setErrorMessage(validation);
+              return;
+            }
+            try {
+              await (this as unknown as {
+                setControlValue(key: string, next: unknown): Promise<void>;
+              }).setControlValue(control.key as string, value);
+              setting.setErrorMessage(null);
+            } catch (error) {
+              setting.setErrorMessage(error instanceof Error ? error.message : String(error));
+              const current = (this as unknown as {
+                getControlValue(key: string): unknown;
+              }).getControlValue(control.key as string);
+              component?.setValue(current);
+            }
+          };
+          let component: { setValue(value: unknown): unknown } | undefined;
+          if (control.type === 'toggle') {
+            setting.setDisabled(Boolean(control.disabled));
+            setting.addToggle((toggle) => {
+              const typedToggle = toggle as {
+                setValue(value: unknown): typeof typedToggle;
+                setDisabled(value: boolean): typeof typedToggle;
+                onChange(callback: (value: unknown) => Promise<void>): typeof typedToggle;
+              };
+              component = typedToggle;
+              typedToggle
+                .setValue(tab.getControlValue(control.key as string))
+                .setDisabled(Boolean(control.disabled))
+                .onChange(save);
+            });
+          } else if (control.type === 'dropdown') {
+            setting.addDropdown((dropdown) => {
+              const typedDropdown = dropdown as {
+                addOptions(options: Record<string, string>): typeof typedDropdown;
+                setValue(value: unknown): typeof typedDropdown;
+                onChange(callback: (value: unknown) => Promise<void>): typeof typedDropdown;
+              };
+              component = typedDropdown;
+              typedDropdown
+                .addOptions(control.options as Record<string, string>)
+                .setValue(tab.getControlValue(control.key as string))
+                .onChange(save);
+            });
+          } else if (control.type === 'folder') {
+            setting.addText((text) => {
+              const typedText = text as {
+                setPlaceholder(value: unknown): typeof typedText;
+                setValue(value: unknown): typeof typedText;
+                onChange(callback: (value: unknown) => Promise<void>): typeof typedText;
+              };
+              component = typedText;
+              typedText
+                .setPlaceholder(control.placeholder)
+                .setValue(tab.getControlValue(control.key as string))
+                .onChange(save);
+              obsidianMock.suggests.push({
+                getSuggestions: (query: string) => tab.app.vault
+                  .getAllLoadedFiles()
+                  .filter((folder: unknown) => (control.filter as (value: unknown) => boolean)(folder))
+                  .map((folder: { path: string }) => folder.path)
+                  .filter((path: string) => path.toLowerCase().includes(query.toLowerCase()))
+                  .sort((left: string, right: string) => left.localeCompare(right)),
+                selectSuggestion: (value: string) => {
+                  typedText.setValue(value);
+                  void save(value);
+                },
+              });
+            });
+          }
+        }
+      };
+      renderItems(definitions);
+    }
   }
 
   class AbstractInputSuggest {
@@ -281,6 +391,7 @@ class PluginHarness extends BrowserSyncPlugin {
   ) {
     super({
       vault: {
+        configDir: '.obsidian',
         getAllLoadedFiles: () => vaultFolders.map((folder) => new TFolder(folder)),
       },
     } as unknown as App, { id: 'browser-history-sync' } as PluginManifest);

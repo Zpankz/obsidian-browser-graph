@@ -24,7 +24,7 @@ function unsafeComponent(component: string): boolean {
   return WINDOWS_DEVICE_NAME.test(deviceBase);
 }
 
-export function normalizeSafeVaultPath(value: string): string | null {
+export function normalizeSafeVaultPath(value: string, configDir?: string): string | null {
   const candidate = value.replace(/\\/g, '/');
   if (
     candidate.length === 0
@@ -40,9 +40,28 @@ export function normalizeSafeVaultPath(value: string): string | null {
   }
 
   const parts = rawParts.filter((part) => part.length > 0 && part !== '.');
-  if (parts.length === 0 || parts[0].toLowerCase() === '.obsidian') {
+  if (parts.length === 0) {
     return null;
   }
 
-  return parts.join('/');
+  const normalized = parts.join('/');
+  if (configDir !== undefined) {
+    const normalizedConfigDir = normalizeConfigDir(configDir);
+    if (
+      normalizedConfigDir !== null
+      && (normalized.toLowerCase() === normalizedConfigDir.toLowerCase()
+        || normalized.toLowerCase().startsWith(`${normalizedConfigDir.toLowerCase()}/`))
+    ) {
+      return null;
+    }
+  }
+  return normalized;
+}
+
+function normalizeConfigDir(value: string): string | null {
+  const parts = value.replace(/\\/g, '/').split('/')
+    .filter((part) => part.length > 0 && part !== '.');
+  return parts.length === 0 || parts.some((part) => part === '..')
+    ? null
+    : parts.join('/');
 }

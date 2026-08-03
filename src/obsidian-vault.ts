@@ -5,8 +5,14 @@ import { normalizeSafeVaultPath } from './vault-path';
 export class ObsidianVaultPort implements VaultPort {
   constructor(private readonly vault: Vault) {}
 
-  async exists(path: string): Promise<boolean> {
-    return this.vault.getAbstractFileByPath(safeVaultPath(path)) !== null;
+  exists(path: string): Promise<boolean> {
+    try {
+      return Promise.resolve(
+        this.vault.getAbstractFileByPath(this.safeVaultPath(path)) !== null,
+      );
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   async read(path: string): Promise<string> {
@@ -14,7 +20,7 @@ export class ObsidianVaultPort implements VaultPort {
   }
 
   async create(path: string, content: string): Promise<void> {
-    await this.vault.create(safeVaultPath(path), content);
+    await this.vault.create(this.safeVaultPath(path), content);
   }
 
   async append(path: string, content: string): Promise<void> {
@@ -22,7 +28,7 @@ export class ObsidianVaultPort implements VaultPort {
   }
 
   async ensureFolder(path: string): Promise<void> {
-    const normalized = safeVaultPath(path);
+    const normalized = this.safeVaultPath(path);
     const parts = normalized.split('/');
     for (let index = 1; index <= parts.length; index += 1) {
       const candidate = parts.slice(0, index).join('/');
@@ -48,7 +54,7 @@ export class ObsidianVaultPort implements VaultPort {
     visit: (markdown: string) => void,
     root?: string,
   ): Promise<void> {
-    const normalizedRoot = root === undefined ? undefined : safeVaultPath(root);
+    const normalizedRoot = root === undefined ? undefined : this.safeVaultPath(root);
     const files = this.vault.getMarkdownFiles()
       .filter((file) => normalizedRoot === undefined
         || file.path.startsWith(`${normalizedRoot}/`))
@@ -59,19 +65,19 @@ export class ObsidianVaultPort implements VaultPort {
   }
 
   private fileAt(path: string): TFile {
-    const normalized = safeVaultPath(path);
+    const normalized = this.safeVaultPath(path);
     const file = this.vault.getAbstractFileByPath(normalized);
     if (!(file instanceof TFile)) {
       throw new Error(`Vault file not found: ${normalized}`);
     }
     return file;
   }
-}
 
-function safeVaultPath(value: string): string {
-  const normalized = normalizeSafeVaultPath(value);
-  if (normalized === null) {
-    throw new Error(`Unsafe vault path: ${value}`);
+  private safeVaultPath(value: string): string {
+    const normalized = normalizeSafeVaultPath(value, this.vault.configDir);
+    if (normalized === null) {
+      throw new Error(`Unsafe vault path: ${value}`);
+    }
+    return normalized;
   }
-  return normalized;
 }

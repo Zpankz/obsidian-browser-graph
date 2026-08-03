@@ -9,14 +9,37 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
   {
-    files: ['**/*.{js,mjs,ts}'],
+    files: ['src/**/*.ts'],
     languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
       globals: {
         ...globals.browser,
         ...globals.node,
       },
     },
     plugins: { obsidianmd },
+    rules: {
+      'obsidianmd/hardcoded-config-path': 'warn',
+      'obsidianmd/settings-tab/prefer-setting-definitions': 'warn',
+    },
+  },
+  {
+    files: ['**/*.{js,mjs}'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+      },
+    },
+  },
+  {
+    files: ['tests/**/*.ts', '*.ts'],
+    ...tseslint.configs.disableTypeChecked,
   },
 );

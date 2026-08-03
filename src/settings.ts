@@ -49,12 +49,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function normalizedVaultFolder(value: string): string | null {
-  return normalizeSafeVaultPath(value);
+function normalizedVaultFolder(value: string, configDir?: string): string | null {
+  return normalizeSafeVaultPath(value, configDir);
 }
 
-export function isSafeVaultFolder(value: unknown): value is string {
-  return typeof value === 'string' && normalizedVaultFolder(value) !== null;
+export function isSafeVaultFolder(value: unknown, configDir?: string): value is string {
+  return typeof value === 'string' && normalizedVaultFolder(value, configDir) !== null;
 }
 
 function settingValue<T extends string>(
@@ -67,7 +67,7 @@ function settingValue<T extends string>(
     : fallback;
 }
 
-function migrateSettings(value: unknown): PluginSettings {
+function migrateSettings(value: unknown, configDir?: string): PluginSettings {
   if (!isRecord(value)) {
     return {
       ...DEFAULT_SETTINGS,
@@ -88,8 +88,8 @@ function migrateSettings(value: unknown): PluginSettings {
     },
     {} as Record<BrowserId, boolean>,
   );
-  const outputFolder = isSafeVaultFolder(value.outputFolder)
-    ? normalizedVaultFolder(value.outputFolder) ?? DEFAULT_SETTINGS.outputFolder
+  const outputFolder = isSafeVaultFolder(value.outputFolder, configDir)
+    ? normalizedVaultFolder(value.outputFolder, configDir) ?? DEFAULT_SETTINGS.outputFolder
     : DEFAULT_SETTINGS.outputFolder;
 
   return {
@@ -142,6 +142,7 @@ export function migratePersistedData(
   raw: unknown,
   currentDeviceIdentityHash: string,
   nowMs = Date.now(),
+  configDir?: string,
 ): PersistedData {
   if (!DEVICE_IDENTITY_HASH.test(currentDeviceIdentityHash)) {
     throw new Error('Browser Sync requires a hashed local device identity.');
@@ -153,7 +154,7 @@ export function migratePersistedData(
   return {
     version: 3,
     deviceIdentityHash: currentDeviceIdentityHash,
-    settings: migrateSettings(data.settings),
+    settings: migrateSettings(data.settings, configDir),
     cursors: cursorsBelongToThisDevice ? migrateCursors(data.cursors, nowMs) : {},
   };
 }

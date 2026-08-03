@@ -54,7 +54,7 @@ export function normalizeVisit(
     profileName: profile.profileName,
     visitedAt: new Date(normalizedTimestamp),
     title: typeof title === 'string' ? title : '',
-    url: typeof url === 'string' ? url : String(url ?? ''),
+    url: typeof url === 'string' ? url : '',
   };
 }
 
