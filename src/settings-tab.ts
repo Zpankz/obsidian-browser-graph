@@ -157,7 +157,10 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
             },
             ['outputFolder'],
           );
-          text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
+          const savedFolder = this.browserSyncPlugin.data.settings.outputFolder;
+          if (value === savedFolder) {
+            text.setValue(savedFolder);
+          }
         } catch {
           text.setValue(this.browserSyncPlugin.data.settings.outputFolder);
           outputFolder.setErrorMessage(saveError);

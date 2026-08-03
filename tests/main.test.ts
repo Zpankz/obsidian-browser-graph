@@ -847,6 +847,29 @@ describe('BrowserSyncSettingTab', () => {
     expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('History/Imported');
   });
 
+  it('does not erase a trailing separator while typing a nested output folder', async () => {
+    const plugin = new PluginHarness(undefined, runtime());
+    await plugin.onload();
+    plugin.settingTabs[0].display();
+    const output = setting('Output folder');
+
+    if (output.text) {
+      output.text.inputEl.value = 'Projects/';
+    }
+    await output.text?.onChange?.('Projects/');
+
+    expect(output.text?.inputEl.value).toBe('Projects/');
+    expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('Projects');
+
+    if (output.text) {
+      output.text.inputEl.value = 'Projects/Research';
+    }
+    await output.text?.onChange?.('Projects/Research');
+
+    expect(output.text?.inputEl.value).toBe('Projects/Research');
+    expect(plugin.saved.at(-1)?.settings.outputFolder).toBe('Projects/Research');
+  });
+
   it('suggests safe vault folders and saves a selected suggestion', async () => {
     const plugin = new PluginHarness(
       undefined,
