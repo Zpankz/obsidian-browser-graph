@@ -40,11 +40,11 @@ import {
 import { createSqliteFactory, type SqliteFactory } from './sql/sqlite';
 import { withDatabaseSnapshot } from './sql/snapshot';
 import {
-  ImportAlreadyRunningError,
   runImport,
   type ImportDependencies,
   type ImportRequest,
 } from './sync/importer';
+import { BrowserSyncOperationAlreadyRunningError } from './sync/operation-guard';
 
 export interface BrowserSyncRuntime {
   platform: DiscoveryPlatform;
@@ -195,7 +195,7 @@ export default class BrowserSyncPlugin extends Plugin {
         );
       }
     } catch (error) {
-      if (error instanceof ImportAlreadyRunningError) {
+      if (error instanceof BrowserSyncOperationAlreadyRunningError) {
         runtime.notice('A browser history import is already running.');
         return;
       }

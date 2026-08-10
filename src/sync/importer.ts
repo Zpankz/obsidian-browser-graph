@@ -10,10 +10,19 @@ import type {
 import {
   extractImportedIds,
   newNote,
-  renderVisit,
-  stableVisitId,
+  renderHistoryRecord,
 } from '../output/markdown';
+import { codecFor, formatForPath, type OutputFormat } from '../output/codec';
+import {
+  compareHistoryRecords,
+  reconcileRecords,
+  recordFromVisit,
+  type BrowserHistoryDocument,
+  type BrowserHistoryRecord,
+  type HistorySourceFormat,
+} from '../output/document';
 import { destinationPath, periodFor } from '../output/periods';
+import { browserSyncOperationGuard } from './operation-guard';
 
 export interface ImportDependencies {
   discover: () => Promise<BrowserProfile[]>;
@@ -31,26 +40,12 @@ export interface ImportRequest {
   rebuild?: boolean;
 }
 
-export class ImportAlreadyRunningError extends Error {
-  constructor() {
-    super('A browser history import is already running');
-    this.name = 'ImportAlreadyRunningError';
-  }
-}
-
-let importRunning = false;
-
 export async function runImport(
   request: ImportRequest,
   dependencies: ImportDependencies,
 ): Promise<ImportSummary> {
-  if (importRunning) {
-    throw new ImportAlreadyRunningError();
-  }
-
-  importRunning = true;
-  const settings = cloneSettings(request.settings ?? request.data.settings);
-  try {
+  return browserSyncOperationGuard.run(async () => {
+    const settings = cloneSettings(request.settings ?? request.data.settings);
     if (request.rebuild) {
       await resetCursorsForRebuild(request.data, dependencies.saveData);
     }
@@ -60,9 +55,7 @@ export async function runImport(
       settings,
       request.rebuild ? settings.outputFolder : undefined,
     );
-  } finally {
-    importRunning = false;
-  }
+  });
 }
 
 interface ProfileResult {
@@ -73,7 +66,7 @@ interface ProfileResult {
 interface Candidate {
   id: string;
   owner: ProfileResult;
-  visit: NormalizedVisit;
+  record: BrowserHistoryRecord;
 }
 
 interface DestinationGroup {
@@ -126,50 +119,65 @@ async function performImport(
   const failedProfileWrites = new Map<string, string>();
 
   for (const [path, group] of sortedGroups(groups)) {
-    let contributors = new Set(
-      group.candidates.map((candidate) => candidate.owner.profile.sourceKey),
-    );
+    let contributors = new Set<string>();
     try {
-      const existing = await readExisting(dependencies.vault, path);
-      for (const id of extractImportedIds(existing ?? '')) {
-        managedIds.add(id);
-      }
-      const pending: Candidate[] = [];
-      const pendingIds = new Set<string>();
-      contributors = new Set<string>();
-      for (const candidate of group.candidates) {
-        if (managedIds.has(candidate.id) || pendingIds.has(candidate.id)) {
-          summary.alreadyPresent += 1;
-          continue;
-        }
-        pendingIds.add(candidate.id);
-        contributors.add(candidate.owner.profile.sourceKey);
-        pending.push(candidate);
+      const pending = candidatesMissingFromIndex(
+        group.candidates,
+        managedIds,
+        summary,
+      );
+      contributors = contributorKeys(pending);
+      if (pending.length === 0) {
+        continue;
       }
 
-      if (pending.length > 0) {
+      const existing = await readExisting(dependencies.vault, path);
+      addDestinationIds(
+        managedIds,
+        settings.outputFormat,
+        existing,
+        group.label,
+      );
+      const pendingAfterRead = candidatesMissingFromIndex(
+        pending,
+        managedIds,
+        summary,
+      );
+      contributors = contributorKeys(pendingAfterRead);
+
+      if (pendingAfterRead.length > 0) {
         const latestExisting = await readExisting(dependencies.vault, path);
-        for (const id of extractImportedIds(latestExisting ?? '')) {
-          managedIds.add(id);
-        }
-        const appendable = pending.filter((candidate) => {
-          if (managedIds.has(candidate.id)) {
-            summary.alreadyPresent += 1;
-            return false;
-          }
-          return true;
-        });
-        contributors = new Set(
-          appendable.map((candidate) => candidate.owner.profile.sourceKey),
+        addDestinationIds(
+          managedIds,
+          settings.outputFormat,
+          latestExisting,
+          group.label,
         );
+        const appendable = candidatesMissingFromIndex(
+          pendingAfterRead,
+          managedIds,
+          summary,
+        );
+        contributors = contributorKeys(appendable);
         if (appendable.length > 0) {
-          await appendEntries(
-            dependencies.vault,
-            path,
-            group.label,
-            latestExisting,
-            appendable.map((candidate) => renderVisit(candidate.visit)),
-          );
+          if (settings.outputFormat === 'markdown') {
+            await appendEntries(
+              dependencies.vault,
+              path,
+              group.label,
+              latestExisting,
+              appendable.map((candidate) => renderHistoryRecord(candidate.record)),
+            );
+          } else {
+            await writeStructuredEntries(
+              dependencies.vault,
+              path,
+              group.label,
+              settings.outputFormat,
+              latestExisting,
+              appendable.map((candidate) => candidate.record),
+            );
+          }
           for (const candidate of appendable) {
             managedIds.add(candidate.id);
           }
@@ -232,11 +240,8 @@ function groupDestinations(
         label: periodFor(candidate.visitedAt, settings.period).label,
         candidates: [],
       };
-      group.candidates.push({
-        id: stableVisitId(candidate),
-        owner,
-        visit: candidate,
-      });
+      const record = recordFromVisit(candidate);
+      group.candidates.push({ id: record.sync!.id, owner, record });
       groups.set(path, group);
     }
   }
@@ -254,8 +259,7 @@ function sortedGroups(
 }
 
 function compareCandidates(left: Candidate, right: Candidate): number {
-  const timeOrder = left.visit.visitedAt.getTime() - right.visit.visitedAt.getTime();
-  return timeOrder || left.id.localeCompare(right.id);
+  return compareHistoryRecords(left.record, right.record);
 }
 
 async function readExisting(vault: VaultPort, path: string): Promise<string | undefined> {
@@ -267,12 +271,147 @@ async function readManagedMarkerIndex(
   root?: string,
 ): Promise<Set<string>> {
   const importedIds = new Set<string>();
-  await vault.scanFiles(['.md'], ({ content }) => {
-    for (const id of extractImportedIds(content)) {
-      importedIds.add(id);
+  await vault.scanFiles(['.md', '.csv', '.json'], ({ path, content }) => {
+    const format = formatForPath(path);
+    if (!format) {
+      return;
+    }
+    if (format === 'markdown' && !hasManagedMarkdownIdentity(content)) {
+      for (const id of extractImportedIds(content)) {
+        importedIds.add(id);
+      }
+      return;
+    }
+    try {
+      const parsed = codecFor(format).parse(content);
+      addRecordIds(importedIds, parsed.document.records);
+    } catch {
+      // Unsupported and malformed vault files are not managed history exports.
     }
   }, root);
   return importedIds;
+}
+
+function candidatesMissingFromIndex(
+  candidates: Candidate[],
+  importedIds: Set<string>,
+  summary: ImportSummary,
+): Candidate[] {
+  const pending: Candidate[] = [];
+  const pendingIds = new Set<string>();
+  for (const candidate of candidates) {
+    if (importedIds.has(candidate.id) || pendingIds.has(candidate.id)) {
+      summary.alreadyPresent += 1;
+      continue;
+    }
+    pendingIds.add(candidate.id);
+    pending.push(candidate);
+  }
+  return pending;
+}
+
+function contributorKeys(candidates: Candidate[]): Set<string> {
+  return new Set(
+    candidates.map((candidate) => candidate.owner.profile.sourceKey),
+  );
+}
+
+function addDestinationIds(
+  importedIds: Set<string>,
+  format: OutputFormat,
+  content: string | undefined,
+  period: string,
+): void {
+  if (content === undefined) {
+    return;
+  }
+  if (format === 'markdown') {
+    if (hasManagedMarkdownIdentity(content)) {
+      const parsed = codecFor(format).parse(content, { period });
+      addRecordIds(importedIds, parsed.document.records);
+    } else {
+      for (const id of extractImportedIds(content)) {
+        importedIds.add(id);
+      }
+    }
+    return;
+  }
+  const parsed = codecFor(format).parse(content, { period });
+  addRecordIds(importedIds, parsed.document.records);
+}
+
+function hasManagedMarkdownIdentity(content: string): boolean {
+  const lines = content.split(/\r?\n/, 3);
+  return lines[0] === '---' && lines[1] === 'browser-sync: true';
+}
+
+function addRecordIds(
+  importedIds: Set<string>,
+  records: BrowserHistoryRecord[],
+): void {
+  for (const record of records) {
+    if (record.sync) {
+      importedIds.add(record.sync.id);
+    }
+  }
+}
+
+async function writeStructuredEntries(
+  vault: VaultPort,
+  path: string,
+  period: string,
+  format: Exclude<OutputFormat, 'markdown'>,
+  existing: string | undefined,
+  records: BrowserHistoryRecord[],
+): Promise<void> {
+  const codec = codecFor(format);
+  const parsedExisting = existing === undefined
+    ? undefined
+    : codec.parse(existing, { period }).document;
+  const mergedDocument = historyDocument(
+    period,
+    reconcileRecords([parsedExisting?.records ?? [], records]),
+    importedSourceFormat(parsedExisting),
+  );
+  const serialized = codec.serialize(mergedDocument);
+  codec.parse(serialized, { period });
+  await ensureParentFolder(vault, path);
+  await vault.write(path, serialized);
+}
+
+function historyDocument(
+  period: string,
+  records: BrowserHistoryRecord[],
+  sourceFormat: HistorySourceFormat,
+): BrowserHistoryDocument {
+  return {
+    schema_version: 1,
+    type: 'browser_history',
+    metadata: {
+      browser_sync: true,
+      period,
+      heading: 'Browser history',
+      source_format: sourceFormat,
+    },
+    records,
+  };
+}
+
+function importedSourceFormat(
+  existing: BrowserHistoryDocument | undefined,
+): HistorySourceFormat {
+  if (existing === undefined
+    || existing.metadata.source_format === 'obsidian_browser_sync_browser_database') {
+    return 'obsidian_browser_sync_browser_database';
+  }
+  return 'obsidian_browser_sync_mixed';
+}
+
+async function ensureParentFolder(vault: VaultPort, path: string): Promise<void> {
+  const slash = path.lastIndexOf('/');
+  if (slash !== -1) {
+    await vault.ensureFolder(path.slice(0, slash));
+  }
 }
 
 async function resetCursorsForRebuild(
@@ -304,10 +443,7 @@ async function appendEntries(
     ? ''
     : existing.endsWith('\n') ? '\n' : '\n\n';
   if (existing === undefined) {
-    const slash = path.lastIndexOf('/');
-    if (slash !== -1) {
-      await vault.ensureFolder(path.slice(0, slash));
-    }
+    await ensureParentFolder(vault, path);
     await vault.create(path, newNote(label, []));
   }
   await vault.append(path, separator + entries.join('\n'));
