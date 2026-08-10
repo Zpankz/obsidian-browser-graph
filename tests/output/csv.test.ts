@@ -31,10 +31,11 @@ it.each(['=1+1', '+cmd', '-2+3', '@SUM(A1)', '\tformula', '\rformula', '\nformul
 );
 
 it('distinguishes an absent original title from a present empty original title', () => {
-  const absentOriginalTitle = historyRecord({ title: '' });
+  const absentOriginalTitle = historyRecord({ title: '', sync: undefined });
   const presentEmptyOriginalTitle = historyRecord({
     title: '',
     original_title: '',
+    sync: undefined,
   });
   const document = historyDocument({
     records: [absentOriginalTitle, presentEmptyOriginalTitle],
@@ -77,7 +78,14 @@ it('rejects malformed RFC 4180 quoted fields', () => {
 });
 
 it('rejects inconsistent document metadata rows', () => {
-  const document = historyDocument({ records: [historyRecord(), historyRecord({ title: 'second' })] });
+  const document = historyDocument({ records: [historyRecord(), historyRecord({
+    title: 'second',
+    sync: {
+      namespace: 'obsidian-browser-sync',
+      browser: 'chrome',
+      id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+  })] });
   const rows = serializeCsvDocument(document).trimEnd().split('\r\n');
   const cells = rows[2].split(',');
   cells[3] = '2026-09';
@@ -106,4 +114,19 @@ it.each([
   cells[index] = value;
   rows[1] = cells.join(',');
   expect(() => parseCsvDocument(`${rows.join('\r\n')}\r\n`)).toThrow(column);
+});
+
+it('rejects conflicting semantic records with one sync ID but permits identical repeats', () => {
+  const record = historyRecord();
+  const firstRows = serializeCsvDocument(historyDocument({ records: [record] }))
+    .trimEnd().split('\r\n');
+  const conflictingRows = serializeCsvDocument(historyDocument({
+    records: [{ ...record, url: 'https://conflict.example.test/' }],
+  })).trimEnd().split('\r\n');
+  const conflicting = `${firstRows[0]}\r\n${firstRows[1]}\r\n${conflictingRows[1]}\r\n`;
+  const identical = historyDocument({ records: [record, { ...record }] });
+
+  expect(() => parseCsvDocument(conflicting)).toThrow('sync ID');
+  expect(parseCsvDocument(serializeCsvDocument(identical)).document.records)
+    .toEqual([record, record]);
 });

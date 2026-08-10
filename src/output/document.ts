@@ -66,6 +66,13 @@ const timestampPattern = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d[+
 const periodPattern = /^(?:\d{4}|\d{4}-(?:0[1-9]|1[0-2])|\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3]))$/;
 const syncIdPattern = /^[a-f0-9]{24}$/;
 
+export class ConflictingSyncIdError extends Error {
+  constructor() {
+    super('Conflicting browser history records share a sync ID');
+    this.name = 'ConflictingSyncIdError';
+  }
+}
+
 export function normalizeCanonicalText(value: string): string {
   return Array.from(value, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -143,11 +150,13 @@ export function validateBrowserHistoryDocument(value: unknown): BrowserHistoryDo
   if (!Array.isArray(value.records)) {
     throw new Error('records must be an array');
   }
+  const records = value.records.map((record) => validateBrowserHistoryRecord(record));
+  assertNoConflictingSyncRecords(records);
   return {
     schema_version: 1,
     type: 'browser_history',
     metadata,
-    records: value.records.map((record) => validateBrowserHistoryRecord(record)),
+    records,
   };
 }
 
@@ -175,7 +184,7 @@ export function reconcileRecords(documents: BrowserHistoryRecord[][]): BrowserHi
       if (record.sync) {
         const existing = syncRecords.get(record.sync.id);
         if (existing && semanticRecordKey(existing) !== semanticRecordKey(record)) {
-          throw new Error('Conflicting browser history records share a sync ID');
+          throw new ConflictingSyncIdError();
         }
         syncRecords.set(record.sync.id, existing ?? record);
         continue;
@@ -284,7 +293,22 @@ function isValidPeriod(value: string): boolean {
   if (!periodPattern.test(value)) {
     return false;
   }
+  const year = Number(value.slice(0, 4));
+  if (year < 1000) {
+    return false;
+  }
+  if (value.includes('-W')) {
+    const week = Number(value.slice(6, 8));
+    return week <= isoWeeksInYear(year);
+  }
   return value.length !== 10 || hasValidCalendarDate(value);
+}
+
+function isoWeeksInYear(year: number): 52 | 53 {
+  const januaryFirst = new Date(Date.UTC(year, 0, 1)).getUTCDay() || 7;
+  return januaryFirst === 4 || (januaryFirst === 3 && isLeapYear(year))
+    ? 53
+    : 52;
 }
 
 function hasValidCalendarDate(value: string): boolean {
@@ -340,6 +364,21 @@ function semanticRecordKey(record: BrowserHistoryRecord): string {
     record.sync?.namespace ?? null,
     record.sync?.browser ?? null,
   ]);
+}
+
+function assertNoConflictingSyncRecords(records: BrowserHistoryRecord[]): void {
+  const semanticRecords = new Map<string, string>();
+  for (const record of records) {
+    if (!record.sync) {
+      continue;
+    }
+    const semantic = semanticRecordKey(record);
+    const existing = semanticRecords.get(record.sync.id);
+    if (existing !== undefined && existing !== semantic) {
+      throw new ConflictingSyncIdError();
+    }
+    semanticRecords.set(record.sync.id, semantic);
+  }
 }
 
 function sortKey(record: BrowserHistoryRecord): string {

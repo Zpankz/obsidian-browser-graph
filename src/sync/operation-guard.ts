@@ -1,6 +1,6 @@
 export class BrowserSyncOperationAlreadyRunningError extends Error {
   constructor() {
-    super('A browser history import is already running');
+    super('A Browser Sync operation is already running.');
     this.name = 'BrowserSyncOperationAlreadyRunningError';
   }
 }

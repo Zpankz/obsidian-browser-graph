@@ -2,10 +2,15 @@ import { expect, it, vi } from 'vitest';
 import type { PersistedData } from '../../src/domain';
 import { DEFAULT_SETTINGS } from '../../src/settings';
 import { convertExistingExports } from '../../src/sync/converter';
-import { parseCsvDocument, serializeCsvDocument } from '../../src/output/csv';
+import {
+  CSV_HEADER,
+  parseCsvDocument,
+  serializeCsvDocument,
+} from '../../src/output/csv';
 import { parseJsonDocument, serializeJsonDocument } from '../../src/output/json';
 import { newNote, renderVisit, stableVisitId } from '../../src/output/markdown';
 import { serializeMarkdownDocument } from '../../src/output/markdown';
+import { codecFor, type OutputFormat } from '../../src/output/codec';
 import { runImport } from '../../src/sync/importer';
 import { BrowserSyncOperationAlreadyRunningError } from '../../src/sync/operation-guard';
 import { historyDocument, historyRecord } from '../helpers/history-documents';
@@ -232,6 +237,127 @@ it('retains user-authored Markdown after a successful replacement conversion', a
   expect(vault.hasFile('Browser History/2026/2026-08.json')).toBe(true);
   expect(vault.trashedPaths()).toEqual([]);
 });
+
+it.each(['keep', 'replace'] as const)(
+  'never rewrites a Markdown target containing user content in %s mode',
+  async (formatConversionBehavior) => {
+    const source = 'Browser History/source.json';
+    const target = 'Browser History/2026/2026-08.md';
+    const targetContent = `${newNote('2026-08', [])}Private target note\n`;
+    const vault = fakeVault({
+      files: {
+        [source]: serializeJsonDocument(historyDocument()),
+        [target]: targetContent,
+      },
+    });
+
+    const summary = await convertExistingExports({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: 'markdown',
+        formatConversionBehavior,
+      },
+    }, { vault });
+
+    expect(summary.failed).toEqual([
+      { path: target, category: 'user-content-destination' },
+    ]);
+    expect(vault.readText(target)).toBe(targetContent);
+    expect(vault.hasFile(source)).toBe(true);
+    expect(vault.trashedPaths()).toEqual([]);
+  },
+);
+
+it.each(['keep', 'replace'] as const)(
+  'never rewrites late user content added to a Markdown target in %s mode',
+  async (formatConversionBehavior) => {
+    const source = 'Browser History/source.json';
+    const target = 'Browser History/2026/2026-08.md';
+    const initialTarget = newNote('2026-08', []);
+    const lateTarget = `${initialTarget}Private target note added during retry\n`;
+    const vault = fakeVault({
+      files: {
+        [source]: serializeJsonDocument(historyDocument()),
+        [target]: initialTarget,
+      },
+      conditionalWriteInterference: {
+        path: target,
+        contents: [lateTarget],
+      },
+    });
+
+    const summary = await convertExistingExports({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: 'markdown',
+        formatConversionBehavior,
+      },
+    }, { vault });
+
+    expect(summary.failed).toEqual([
+      { path: target, category: 'user-content-destination' },
+    ]);
+    expect(vault.readText(target)).toBe(lateTarget);
+    expect(vault.hasFile(source)).toBe(true);
+    expect(vault.trashedPaths()).toEqual([]);
+  },
+);
+
+it.each([
+  ['markdown', false],
+  ['markdown', true],
+  ['csv', false],
+  ['csv', true],
+  ['json', false],
+  ['json', true],
+] as const)(
+  'preserves a %s target whose period changes at the %s boundary',
+  async (targetFormat, late) => {
+    const sourceFormat = targetFormat === 'markdown' ? 'json' : 'markdown';
+    const source = `Browser History/source.${codecFor(sourceFormat).extension.slice(1)}`;
+    const target = `Browser History/2026/2026-08.${codecFor(targetFormat).extension.slice(1)}`;
+    const wrongTarget = codecFor(targetFormat).serialize(historyDocument({
+      metadata: { ...historyDocument().metadata, period: '2026-09' },
+      records: [historyRecord({
+        timestamp: '2026-09-03T15:34:56+03:00',
+        sync: {
+          namespace: 'obsidian-browser-sync',
+          browser: 'chrome',
+          id: 'bbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      })],
+    }));
+    const initialTarget = codecFor(targetFormat).serialize(historyDocument({ records: [] }));
+    const vault = fakeVault({
+      files: {
+        [source]: codecFor(sourceFormat).serialize(historyDocument()),
+        [target]: late ? initialTarget : wrongTarget,
+      },
+      ...(late ? {
+        conditionalWriteInterference: {
+          path: target,
+          contents: [wrongTarget],
+        },
+      } : {}),
+    });
+
+    const summary = await convertExistingExports({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: targetFormat,
+        formatConversionBehavior: 'replace',
+      },
+    }, { vault });
+
+    expect(summary.failed).toContainEqual({
+      path: target,
+      category: 'routing-collision',
+    });
+    expect(vault.readText(target)).toBe(wrongTarget);
+    expect(vault.hasFile(source)).toBe(true);
+    expect(vault.trashedPaths()).toEqual([]);
+  },
+);
 
 it('reports a read-back failure and does not trash its source', async () => {
   const source = 'Browser History/2026/2026-08.md';
@@ -549,6 +675,268 @@ it('retains affected sources and continues after bounded destination churn', asy
   expect(vault.hasFile(source)).toBe(true);
   expect(vault.hasFile('Browser History/2026/2026-09.json')).toBe(true);
   expect(vault.trashedPaths()).toEqual([independentSource]);
+});
+
+const singleSourceTransitions = [
+  ['markdown', 'csv'],
+  ['markdown', 'json'],
+  ['csv', 'markdown'],
+  ['csv', 'json'],
+  ['json', 'markdown'],
+  ['json', 'csv'],
+] as const satisfies ReadonlyArray<readonly [OutputFormat, OutputFormat]>;
+
+it.each(singleSourceTransitions)(
+  'records immediate %s provenance when converting a single source to %s',
+  async (sourceFormat, targetFormat) => {
+    const source = `Browser History/source.${codecFor(sourceFormat).extension.slice(1)}`;
+    const target = `Browser History/2026/2026-08.${codecFor(targetFormat).extension.slice(1)}`;
+    const sourceDocument = historyDocument({
+      metadata: {
+        ...historyDocument().metadata,
+        source_format: 'obsidian_browser_sync_browser_database',
+      },
+    });
+    const vault = fakeVault({
+      files: { [source]: codecFor(sourceFormat).serialize(sourceDocument) },
+    });
+    const request = {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: targetFormat,
+        formatConversionBehavior: 'keep' as const,
+      },
+    };
+
+    const first = await convertExistingExports(request, { vault });
+    const second = await convertExistingExports(request, { vault });
+    const converted = codecFor(targetFormat).parse(
+      vault.readText(target),
+      { period: '2026-08' },
+    ).document;
+
+    expect(first.failed).toEqual([]);
+    expect(second).toMatchObject({ converted: 0, alreadyCurrent: 1, failed: [] });
+    expect(converted.records).toEqual(sourceDocument.records);
+    expect(converted.metadata.source_format).toBe(
+      targetFormat === 'markdown'
+        ? 'obsidian_browser_sync_markdown'
+        : `obsidian_browser_sync_${sourceFormat}`,
+    );
+  },
+);
+
+it.each(['csv', 'json'] as const)(
+  'validates normalized %s-to-Markdown read-back before replacing the direct-import source',
+  async (sourceFormat) => {
+    const source = `Browser History/2026/2026-08.${sourceFormat}`;
+    const target = 'Browser History/2026/2026-08.md';
+    const vault = fakeVault({
+      files: {
+        [source]: codecFor(sourceFormat).serialize(historyDocument({
+          metadata: {
+            ...historyDocument().metadata,
+            source_format: 'obsidian_browser_sync_browser_database',
+          },
+        })),
+      },
+    });
+
+    const summary = await convertExistingExports({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: 'markdown',
+        formatConversionBehavior: 'replace',
+      },
+    }, { vault });
+
+    expect(summary).toMatchObject({ converted: 1, failed: [] });
+    expect(vault.hasFile(source)).toBe(false);
+    expect(vault.hasFile(target)).toBe(true);
+    expect(vault.trashedPaths()).toEqual([source]);
+  },
+);
+
+it.each([
+  ['markdown', 'keep'],
+  ['markdown', 'replace'],
+  ['json', 'keep'],
+  ['json', 'replace'],
+] as const)(
+  'converts an empty %s document to header-only CSV safely in %s mode and reruns',
+  async (sourceFormat, formatConversionBehavior) => {
+    const source = `Browser History/source.${sourceFormat === 'markdown' ? 'md' : 'json'}`;
+    const target = 'Browser History/2026/2026-08.csv';
+    const empty = historyDocument({ records: [] });
+    const vault = fakeVault({
+      files: { [source]: codecFor(sourceFormat).serialize(empty) },
+    });
+    const request = {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        outputFormat: 'csv' as const,
+        formatConversionBehavior,
+      },
+    };
+
+    const first = await convertExistingExports(request, { vault });
+    const second = await convertExistingExports(request, { vault });
+
+    expect(first.failed).toEqual([]);
+    expect(vault.readText(target)).toBe(`${CSV_HEADER.join(',')}\r\n`);
+    expect(parseCsvDocument(vault.readText(target), { period: '2026-08' })
+      .document.records).toEqual([]);
+    expect(second.failed).toEqual([]);
+    expect(second.alreadyCurrent).toBe(1);
+    expect(vault.hasFile(source)).toBe(formatConversionBehavior === 'keep');
+  },
+);
+
+it('infers period context from a managed header-only CSV source and reruns idempotently', async () => {
+  const source = 'Browser History/2026/2026-08.csv';
+  const target = 'Browser History/2026/2026-08.json';
+  const vault = fakeVault({
+    files: { [source]: `${CSV_HEADER.join(',')}\r\n` },
+  });
+  const request = {
+    settings: {
+      ...DEFAULT_SETTINGS,
+      outputFormat: 'json' as const,
+      formatConversionBehavior: 'keep' as const,
+    },
+  };
+
+  const first = await convertExistingExports(request, { vault });
+  const second = await convertExistingExports(request, { vault });
+
+  expect(first.failed).toEqual([]);
+  expect(parseJsonDocument(vault.readText(target)).document.records).toEqual([]);
+  expect(second).toMatchObject({ converted: 0, alreadyCurrent: 1, failed: [] });
+});
+
+it('infers header-only CSV context from fixed text around the configured period token', async () => {
+  const source = 'Browser History/2026/Browser history - 2026-08.csv';
+  const target = 'Browser History/2026/Browser history - 2026-08.json';
+  const vault = fakeVault({
+    files: { [source]: `${CSV_HEADER.join(',')}\r\n` },
+  });
+
+  const summary = await convertExistingExports({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      fileNameTemplate: 'Browser history - {period}',
+      outputFormat: 'json',
+    },
+  }, { vault });
+
+  expect(summary.failed).toEqual([]);
+  expect(parseJsonDocument(vault.readText(target)).document.records).toEqual([]);
+});
+
+it('infers one equal period from every token in a repeated-token filename template', async () => {
+  const source = 'Browser History/2026/2026-08-2026-08.csv';
+  const target = 'Browser History/2026/2026-08-2026-08.json';
+  const vault = fakeVault({
+    files: { [source]: `${CSV_HEADER.join(',')}\r\n` },
+  });
+
+  const summary = await convertExistingExports({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      fileNameTemplate: '{period}-{period}',
+      outputFormat: 'json',
+    },
+  }, { vault });
+
+  expect(summary.failed).toEqual([]);
+  expect(parseJsonDocument(vault.readText(target)).document.records).toEqual([]);
+});
+
+it('rejects header-only CSV context when the current period kind or managed routing disagrees', async () => {
+  const wrongKind = 'Browser History/2026/2026-W32.csv';
+  const wrongRoute = 'Browser History/archive/2026-08.csv';
+  const vault = fakeVault({
+    files: {
+      [wrongKind]: `${CSV_HEADER.join(',')}\r\n`,
+      [wrongRoute]: `${CSV_HEADER.join(',')}\r\n`,
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: { ...DEFAULT_SETTINGS, outputFormat: 'json' },
+  }, { vault });
+
+  expect(summary.failed).toEqual([
+    { path: wrongKind, category: 'invalid-source' },
+    { path: wrongRoute, category: 'invalid-source' },
+  ]);
+  expect(vault.trashedPaths()).toEqual([]);
+});
+
+it('writes valid independent destinations but trashes nothing when any managed source is invalid', async () => {
+  const valid = 'Browser History/2026/2026-08.md';
+  const malformed = 'Browser History/malformed.json';
+  const target = 'Browser History/2026/2026-08.json';
+  const vault = fakeVault({
+    files: {
+      [valid]: serializeMarkdownDocument(historyDocument({
+        metadata: {
+          ...historyDocument().metadata,
+          source_format: 'obsidian_browser_sync_markdown',
+        },
+      })),
+      [malformed]: '{"type":"browser_history","metadata":{"browser_sync":true}',
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    },
+  }, { vault });
+
+  expect(summary.failed).toEqual([
+    { path: malformed, category: 'invalid-source' },
+  ]);
+  expect(summary.skippedReplacement).toBe(1);
+  expect(vault.hasFile(target)).toBe(true);
+  expect(vault.hasFile(valid)).toBe(true);
+  expect(vault.hasFile(malformed)).toBe(true);
+  expect(vault.trashedPaths()).toEqual([]);
+});
+
+it('rejects an invalid ISO week source before it can collide with a valid routed period', async () => {
+  const invalid = historyDocument({
+    metadata: { ...historyDocument().metadata, period: '2021-W53' },
+  });
+  const valid = historyDocument({
+    metadata: { ...historyDocument().metadata, period: '2022-W01' },
+    records: [historyRecord({
+      timestamp: '2022-01-03T12:00:00+03:00',
+      sync: {
+        namespace: 'obsidian-browser-sync',
+        browser: 'chrome',
+        id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+    })],
+  });
+  const vault = fakeVault({
+    files: {
+      'Browser History/invalid.json': JSON.stringify(invalid),
+      'Browser History/valid.json': serializeJsonDocument(valid),
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: { ...DEFAULT_SETTINGS, outputFormat: 'markdown' },
+  }, { vault });
+
+  expect(summary.failed).toEqual([
+    { path: 'Browser History/invalid.json', category: 'invalid-source' },
+  ]);
+  expect(vault.hasFile('Browser History/2022/2022-01/2022-W01.md')).toBe(true);
 });
 
 it('rejects an import racing conversion and releases the guard afterward', async () => {

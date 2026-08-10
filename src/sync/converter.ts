@@ -35,6 +35,7 @@ interface DestinationGroup {
   path: string;
   period: string;
   sources: ManagedSource[];
+  routingCollision: boolean;
 }
 
 const MAX_DESTINATION_WRITE_ATTEMPTS = 3;
@@ -71,7 +72,11 @@ async function performConversion(
       return;
     }
     try {
-      const parsed = codecFor(format).parse(content);
+      const period = periodContextForPath(path, format, settings);
+      const parsed = codecFor(format).parse(
+        content,
+        period === undefined ? {} : { period },
+      );
       managed.set(path, { path, format, content, ...parsed });
     } catch {
       invalidManagedPaths.add(path);
@@ -80,7 +85,21 @@ async function performConversion(
   }, settings.outputFolder);
 
   const groups = groupByDestination(managed.values(), settings);
+  for (const group of groups.values()) {
+    const occupyingSource = managed.get(group.path);
+    if (occupyingSource
+      && occupyingSource.document.metadata.period !== group.period) {
+      group.routingCollision = true;
+    }
+  }
+  const hasRoutingCollision = [...groups.values()].some(
+    (group) => group.routingCollision,
+  );
   for (const group of [...groups.values()].sort(compareGroupPath)) {
+    if (group.routingCollision) {
+      summary.failed.push({ path: group.path, category: 'routing-collision' });
+      continue;
+    }
     if (invalidManagedPaths.has(group.path)) {
       continue;
     }
@@ -115,9 +134,11 @@ async function performConversion(
       const codec = codecFor(settings.outputFormat);
       const serialized = attempt(
         () => {
-          const candidate = codec.serialize(destination);
-          codec.parse(candidate, { period: group.period });
-          return candidate;
+          const content = codec.serialize(destination);
+          const expectedDocument = codec.parse(content, {
+            period: group.period,
+          }).document;
+          return { content, expectedDocument };
         },
         'validation',
         group.path,
@@ -127,7 +148,7 @@ async function performConversion(
         break;
       }
 
-      const current = targetSource?.content === serialized;
+      const current = targetSource?.content === serialized.content;
       if (!current) {
         let replaced: boolean;
         try {
@@ -135,7 +156,7 @@ async function performConversion(
           replaced = await vault.writeIfUnchanged(
             group.path,
             targetSource?.content,
-            serialized,
+            serialized.content,
           );
         } catch {
           summary.failed.push({ path: group.path, category: 'write' });
@@ -153,7 +174,7 @@ async function performConversion(
         const written = codec.parse(await vault.read(group.path), {
           period: group.period,
         }).document;
-        if (JSON.stringify(written) !== JSON.stringify(destination)) {
+        if (JSON.stringify(written) !== JSON.stringify(serialized.expectedDocument)) {
           throw new Error('Destination does not match the converted document');
         }
       } catch {
@@ -178,6 +199,10 @@ async function performConversion(
     );
     if (settings.formatConversionBehavior === 'keep') {
       summary.retained += originalSources.length;
+      continue;
+    }
+    if (invalidManagedPaths.size > 0 || hasRoutingCollision) {
+      summary.skippedReplacement += originalSources.length;
       continue;
     }
     for (const source of originalSources) {
@@ -255,6 +280,13 @@ async function refreshDestination(
     return false;
   }
   if (scannedTarget?.content === content) {
+    if (format === 'markdown' && scannedTarget.hasUnrecognizedContent) {
+      summary.failed.push({
+        path: group.path,
+        category: 'user-content-destination',
+      });
+      return false;
+    }
     return true;
   }
   if (!hasManagedIdentity(format, content)) {
@@ -263,12 +295,23 @@ async function refreshDestination(
   }
   try {
     const parsed = codecFor(format).parse(content, { period: group.period });
+    if (parsed.document.metadata.period !== group.period) {
+      summary.failed.push({ path: group.path, category: 'routing-collision' });
+      return false;
+    }
     const refreshed: ManagedSource = {
       path: group.path,
       format,
       content,
       ...parsed,
     };
+    if (format === 'markdown' && refreshed.hasUnrecognizedContent) {
+      summary.failed.push({
+        path: group.path,
+        category: 'user-content-destination',
+      });
+      return false;
+    }
     group.sources = [
       ...group.sources.filter((source) => source.path !== group.path),
       refreshed,
@@ -288,7 +331,15 @@ function groupByDestination(
   for (const source of sources) {
     const period = source.document.metadata.period;
     const path = pathForPeriod(settings, period);
-    const group = groups.get(path) ?? { path, period, sources: [] };
+    const group = groups.get(path) ?? {
+      path,
+      period,
+      sources: [],
+      routingCollision: false,
+    };
+    if (group.period !== period) {
+      group.routingCollision = true;
+    }
     group.sources.push(source);
     groups.set(path, group);
   }
@@ -309,27 +360,123 @@ function mergedDocument(group: DestinationGroup): BrowserHistoryDocument {
       browser_sync: true,
       period: group.period,
       heading: 'Browser history',
-      source_format: mergedSourceFormat(group.sources),
+      source_format: mergedSourceFormat(group),
     },
     records,
   };
 }
 
-function mergedSourceFormat(sources: ManagedSource[]): HistorySourceFormat {
-  const formats = new Set(
-    sources.map((source) => source.document.metadata.source_format),
-  );
+function mergedSourceFormat(group: DestinationGroup): HistorySourceFormat {
+  const target = group.sources.find((source) => source.path === group.path);
+  const nonTargets = target === undefined
+    ? group.sources
+    : group.sources.filter((source) => source !== target);
+  if (nonTargets.length === 0 && target) {
+    return target.document.metadata.source_format;
+  }
+  const formats = new Set(nonTargets.map((source) => sourceFormatFor(source.format)));
   return formats.size === 1
-    ? sources[0].document.metadata.source_format
+    ? sourceFormatFor(nonTargets[0].format)
     : 'obsidian_browser_sync_mixed';
 }
 
-function pathForPeriod(settings: PluginSettings, period: string): string {
+function sourceFormatFor(format: OutputFormat): HistorySourceFormat {
+  switch (format) {
+    case 'markdown':
+      return 'obsidian_browser_sync_markdown';
+    case 'csv':
+      return 'obsidian_browser_sync_csv';
+    case 'json':
+      return 'obsidian_browser_sync_json';
+  }
+}
+
+function pathForPeriod(
+  settings: PluginSettings,
+  period: string,
+  outputFormat: OutputFormat = settings.outputFormat,
+): string {
   const descriptor = dateAndKindForPeriod(period);
   return destinationPath(
-    { ...settings, period: descriptor.kind },
+    { ...settings, period: descriptor.kind, outputFormat },
     descriptor.date,
   );
+}
+
+function periodContextForPath(
+  path: string,
+  format: OutputFormat,
+  settings: PluginSettings,
+): string | undefined {
+  if (format !== 'csv') {
+    return undefined;
+  }
+  const extension = codecFor(format).extension;
+  if (!path.toLowerCase().endsWith(extension)) {
+    return undefined;
+  }
+  const basename = path.slice(path.lastIndexOf('/') + 1, -extension.length);
+  const token = '{period}';
+  const templateParts = settings.fileNameTemplate.split(token);
+  if (templateParts.length < 2) {
+    return undefined;
+  }
+  const periodLength = periodKeyLength(settings.period);
+  let position = 0;
+  let period: string | undefined;
+  for (let index = 0; index < templateParts.length; index += 1) {
+    const fixedText = templateParts[index];
+    if (!basename.startsWith(fixedText, position)) {
+      return undefined;
+    }
+    position += fixedText.length;
+    if (index === templateParts.length - 1) {
+      continue;
+    }
+    const candidate = basename.slice(position, position + periodLength);
+    if (candidate.length !== periodLength
+      || (period !== undefined && candidate !== period)) {
+      return undefined;
+    }
+    period = candidate;
+    position += periodLength;
+  }
+  if (position !== basename.length || period === undefined) {
+    return undefined;
+  }
+  if (!periodMatchesKind(period, settings.period)) {
+    return undefined;
+  }
+  return pathForPeriod(settings, period, format) === path ? period : undefined;
+}
+
+function periodKeyLength(kind: PluginSettings['period']): number {
+  switch (kind) {
+    case 'year':
+      return 4;
+    case 'month':
+      return 7;
+    case 'week':
+      return 8;
+    case 'day':
+      return 10;
+  }
+}
+
+function periodMatchesKind(
+  period: string,
+  kind: PluginSettings['period'],
+): boolean {
+  switch (kind) {
+    case 'year':
+      return /^\d{4}$/.test(period);
+    case 'month':
+      return /^\d{4}-\d{2}$/.test(period);
+    case 'week':
+      return /^\d{4}-W\d{2}$/.test(period);
+    case 'day':
+      return /^\d{4}-\d{2}-\d{2}$/.test(period);
+  }
 }
 
 function dateAndKindForPeriod(

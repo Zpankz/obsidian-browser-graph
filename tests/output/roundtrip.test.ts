@@ -92,6 +92,39 @@ describe('cross-format canonical records', () => {
       expect(normalizeSourceFormat(second)).toEqual(normalizeSourceFormat(document));
     },
   );
+
+  it.each(pairwiseFormats)(
+    'preserves lossy-looking inert URLs from %s to %s',
+    (source, target) => {
+      const inertRecords = [
+        '',
+        'javascript:\u0001alert(1)',
+        'not   a\t URL',
+      ].map((url, index) => historyRecord({
+        timestamp: `2026-08-03T09:1${index}:00+03:00`,
+        title: 'Inert URL fidelity',
+        url,
+        representation: 'inert_text',
+        sync: {
+          namespace: 'obsidian-browser-sync',
+          browser: 'chrome',
+          id: `${index + 1}`.repeat(24),
+        },
+      }));
+      const document = historyDocument({ records: inertRecords });
+
+      const first = codecFor(source).parse(
+        codecFor(source).serialize(document),
+        { period: document.metadata.period },
+      ).document;
+      const second = codecFor(target).parse(
+        codecFor(target).serialize(first),
+        { period: document.metadata.period },
+      ).document;
+
+      expect(second.records.map(({ url }) => url)).toEqual(inertRecords.map(({ url }) => url));
+    },
+  );
 });
 
 function fixtureFor(source: OutputFormat, target: OutputFormat): BrowserHistoryDocument {

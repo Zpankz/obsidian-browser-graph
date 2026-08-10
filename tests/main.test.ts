@@ -564,6 +564,22 @@ describe('BrowserSyncPlugin', () => {
     );
   });
 
+  it('uses the generic Browser Sync busy notice for an import-side guard conflict', async () => {
+    const notice = vi.fn();
+    const plugin = new PluginHarness(undefined, runtime({
+      notice,
+      runImporter: vi.fn(async () => {
+        throw new BrowserSyncOperationAlreadyRunningError();
+      }),
+    }));
+    await plugin.onload();
+
+    await plugin.importBrowserHistory();
+
+    expect(notice).toHaveBeenCalledWith('A Browser Sync operation is already running.');
+    expect(notice).not.toHaveBeenCalledWith('A browser history import is already running.');
+  });
+
   it('captures conversion settings before deferred folder existence checks', async () => {
     const existsReady = deferred();
     const vault = fakeVault();
@@ -663,7 +679,10 @@ describe('BrowserSyncPlugin', () => {
         alreadyCurrent: 2,
         retained: 3,
         skippedReplacement: 4,
-        failed: [{ path: `Browser History/${secret}.json`, category: 'write' }],
+        failed: [
+          { path: 'Browser History/2026/2026-08.json', category: 'write' },
+          { path: `Browser History/${secret}.json`, category: 'private-record-title' },
+        ],
       })),
     }));
     await plugin.onload();
@@ -671,12 +690,17 @@ describe('BrowserSyncPlugin', () => {
     await plugin.convertBrowserHistoryExports();
 
     expect(notice).toHaveBeenCalledWith(
-      'Browser history conversion complete: 1 converted, 2 already current, 3 originals retained, 4 replacement skipped, 1 failed.',
+      'Browser history conversion complete: 1 converted, 2 already current, 3 originals retained, 4 replacement skipped, 2 failed.',
     );
     expect(notice).toHaveBeenCalledWith(
       'Some browser history exports could not be converted. Check the output folder and console for details.',
     );
-    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(secret);
+    const diagnostics = JSON.stringify(consoleError.mock.calls);
+    expect(diagnostics).toContain('Browser History/2026/2026-08.json');
+    expect(diagnostics).toContain('write');
+    expect(diagnostics).toContain('unexpected');
+    expect(diagnostics).not.toContain(secret);
+    expect(diagnostics).not.toContain('private-record-title');
     consoleError.mockRestore();
   });
 
@@ -1164,6 +1188,9 @@ describe('BrowserSyncSettingTab', () => {
     expect(setting('Safari').toggle?.disabled).toBe(true);
     expect(setting('Output folder').text?.value).toBe('Browser History');
     expect(setting('File name template').text?.value).toBe('{period}');
+    expect(setting('File name template').description).toBe(
+      "Customize note filenames with {period}. The selected format's extension is added automatically.",
+    );
     expect(setting('Export format').dropdown).toMatchObject({
       value: 'markdown',
       options: { markdown: 'Markdown', csv: 'CSV', json: 'JSON' },

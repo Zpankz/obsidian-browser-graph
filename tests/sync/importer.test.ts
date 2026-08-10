@@ -15,7 +15,11 @@ import {
   fakeVaultWithRenderedVisit,
   type FakeVault,
 } from '../helpers/fake-vault';
-import { renderVisit } from '../../src/output/markdown';
+import {
+  newNote,
+  renderHistoryRecord,
+  renderVisit,
+} from '../../src/output/markdown';
 import { codecFor } from '../../src/output/codec';
 import { recordFromVisit } from '../../src/output/document';
 import { serializeJsonDocument } from '../../src/output/json';
@@ -311,6 +315,266 @@ it('rechecks a structured destination immediately before replacing it', async ()
     .toHaveLength(1);
 });
 
+it.each(['json', 'csv'] as const)(
+  'retries a %s import when a managed destination is created at the write boundary',
+  async (outputFormat) => {
+    const input = normalized({ sourceVisitId: '801' });
+    const concurrent = recordFromVisit(normalized({
+      sourceVisitId: '802',
+      visitedAt: new Date('2026-08-03T12:35:56Z'),
+    }));
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    const concurrentContent = codecFor(outputFormat).serialize(historyDocument({
+      records: [concurrent],
+    }));
+    const vault = fakeVault({
+      conditionalWriteInterference: {
+        path,
+        contents: [concurrentContent],
+      },
+    });
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result).toMatchObject({ imported: 1, failedProfiles: [] });
+    expect(codecFor(outputFormat).parse(vault.readText(path), { period: '2026-08' })
+      .document.records).toEqual([
+      recordFromVisit(input),
+      concurrent,
+    ]);
+    expect(state.cursors[profile.sourceKey]?.sourceVisitId).toBe('801');
+  },
+);
+
+it.each(['json', 'csv'] as const)(
+  'retries a %s import and merges a managed write-boundary modification',
+  async (outputFormat) => {
+    const input = normalized({ sourceVisitId: '811' });
+    const initial = recordFromVisit(normalized({
+      sourceVisitId: '812',
+      visitedAt: new Date('2026-08-03T12:35:56Z'),
+    }));
+    const concurrent = recordFromVisit(normalized({
+      sourceVisitId: '813',
+      visitedAt: new Date('2026-08-03T12:36:56Z'),
+    }));
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    const vault = fakeVault({
+      files: {
+        [path]: codecFor(outputFormat).serialize(historyDocument({ records: [initial] })),
+      },
+      conditionalWriteInterference: {
+        path,
+        contents: [codecFor(outputFormat).serialize(historyDocument({
+          records: [initial, concurrent],
+        }))],
+      },
+    });
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result.failedProfiles).toEqual([]);
+    expect(codecFor(outputFormat).parse(vault.readText(path), { period: '2026-08' })
+      .document.records).toEqual([
+      recordFromVisit(input),
+      initial,
+      concurrent,
+    ]);
+  },
+);
+
+it.each(['json', 'csv'] as const)(
+  'preserves a late unmanaged %s replacement and withholds the contributor cursor',
+  async (outputFormat) => {
+    const input = normalized({ sourceVisitId: '821' });
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    const initial = codecFor(outputFormat).serialize(historyDocument({ records: [] }));
+    const vault = fakeVault({
+      files: { [path]: initial },
+      conditionalWriteInterference: {
+        path,
+        contents: ['Private unmanaged destination'],
+      },
+    });
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result.imported).toBe(0);
+    expect(result.failedProfiles).toEqual([
+      expect.objectContaining({ sourceKey: profile.sourceKey }),
+    ]);
+    expect(state.cursors[profile.sourceKey]).toBeUndefined();
+    expect(vault.readText(path)).toBe('Private unmanaged destination');
+  },
+);
+
+it.each([
+  ['json', false],
+  ['json', true],
+  ['csv', false],
+  ['csv', true],
+] as const)(
+  'rejects a %s destination with the wrong period at the %s boundary',
+  async (outputFormat, late) => {
+    const input = normalized({ sourceVisitId: '826' });
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    const wrongPeriod = codecFor(outputFormat).serialize(historyDocument({
+      metadata: { ...historyDocument().metadata, period: '2026-09' },
+      records: [recordFromVisit(normalized({
+        sourceVisitId: '827',
+        visitedAt: new Date('2026-09-03T12:34:56Z'),
+      }))],
+    }));
+    const initial = codecFor(outputFormat).serialize(historyDocument({ records: [] }));
+    const vault = fakeVault({
+      files: { [path]: late ? initial : wrongPeriod },
+      ...(late ? {
+        conditionalWriteInterference: {
+          path,
+          contents: [wrongPeriod],
+        },
+      } : {}),
+    });
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result.imported).toBe(0);
+    expect(result.failedProfiles).toEqual([
+      expect.objectContaining({ sourceKey: profile.sourceKey }),
+    ]);
+    expect(state.cursors[profile.sourceKey]).toBeUndefined();
+    expect(vault.readText(path)).toBe(wrongPeriod);
+  },
+);
+
+it.each(['json', 'csv'] as const)(
+  'bounds %s import contention at three complete attempts and fails every contributor',
+  async (outputFormat) => {
+    const firstProfile = browserProfile('chrome:first-churn');
+    const secondProfile = browserProfile('chrome:second-churn');
+    const firstVisit = normalizedFor(firstProfile, { sourceVisitId: '831' });
+    const secondVisit = normalizedFor(secondProfile, {
+      sourceVisitId: '832',
+      visitedAt: new Date('2026-08-03T12:35:56Z'),
+    });
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    const churn = ['841', '842', '843'].map((sourceVisitId, index) =>
+      codecFor(outputFormat).serialize(historyDocument({
+        records: [recordFromVisit(normalized({
+          sourceVisitId,
+          visitedAt: new Date(`2026-08-03T12:4${index}:56Z`),
+        }))],
+      })));
+    const vault = fakeVault({
+      conditionalWriteInterference: { path, contents: churn },
+    });
+    const conditionalWrite = vi.fn(vault.writeIfUnchanged.bind(vault));
+    vault.writeIfUnchanged = conditionalWrite;
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      {
+        discover: async () => [firstProfile, secondProfile],
+        readVisits: async (candidate) => candidate.sourceKey === firstProfile.sourceKey
+          ? [firstVisit]
+          : [secondVisit],
+        vault,
+        saveData: async () => {},
+      },
+    );
+
+    expect(conditionalWrite).toHaveBeenCalledTimes(3);
+    expect(result.imported).toBe(0);
+    expect(result.failedProfiles.map(({ sourceKey }) => sourceKey).sort()).toEqual([
+      firstProfile.sourceKey,
+      secondProfile.sourceKey,
+    ].sort());
+    expect(state.cursors).toEqual({});
+    expect(vault.readText(path)).toBe(churn[2]);
+  },
+);
+
+it('fails a structured import whose post-CAS read-back differs from the normalized candidate', async () => {
+  const input = normalized({ sourceVisitId: '851' });
+  const path = 'Browser History/2026/2026-08.json';
+  const replacement = serializeJsonDocument(historyDocument({ records: [] }));
+  const vault = fakeVault();
+  const writeIfUnchanged = vault.writeIfUnchanged.bind(vault);
+  vault.writeIfUnchanged = async (...args) => {
+    const written = await writeIfUnchanged(...args);
+    if (written) {
+      await vault.write(path, replacement);
+    }
+    return written;
+  };
+  const state = persisted({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+      outputFormat: 'json',
+    },
+  });
+
+  const result = await runImport(
+    { data: state },
+    deps({ vault, visits: [input] }),
+  );
+
+  expect(result.imported).toBe(0);
+  expect(result.failedProfiles).toEqual([
+    expect.objectContaining({ sourceKey: profile.sourceKey }),
+  ]);
+  expect(state.cursors[profile.sourceKey]).toBeUndefined();
+  expect(vault.readText(path)).toBe(replacement);
+});
+
 it('writes visits to the configured file name template', async () => {
   const vault = fakeVault();
   const state = persisted({
@@ -370,6 +634,127 @@ it('recovers from missing cursor state by reading hidden markers', async () => {
   expect(result.imported).toBe(1);
   expect(result.alreadyPresent).toBe(1);
 });
+
+it.each([false, true])(
+  'uses an adjacent marker as authority when its generated visit line was edited (rebuild=%s)',
+  async (rebuild) => {
+    const input = normalized({ sourceVisitId: '861' });
+    const rendered = renderVisit(input).trimEnd().split('\n');
+    const timestamp = rendered[0].split(' ', 2).join(' ');
+    const edited = newNote('2026-08', [
+      `${timestamp} User-formatted visit line\n${rendered[1]}`,
+    ]);
+    const path = 'Browser History/2026/2026-08.md';
+    const state = persisted({
+      cursors: rebuild ? {
+        [profile.sourceKey]: {
+          visitedAtMs: input.visitedAt.getTime(),
+          sourceVisitId: input.sourceVisitId,
+        },
+      } : {},
+    });
+    const vault = fakeVault({ files: { [path]: edited } });
+
+    const result = await runImport(
+      { data: state, ...(rebuild ? { rebuild: true } : {}) },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result).toMatchObject({ imported: 0, alreadyPresent: 1 });
+    expect(state.cursors[profile.sourceKey]?.sourceVisitId).toBe('861');
+    expect(vault.readText(path)).toBe(edited);
+    expect(vault.readText(path).match(/obsidian-browser-sync:chrome:/g)).toHaveLength(1);
+  },
+);
+
+it('does not use markers from a proven conflicting Markdown document as vault-wide authority', async () => {
+  const input = normalized({ sourceVisitId: '871' });
+  const record = recordFromVisit(input);
+  const conflicting = newNote('2026-08', [
+    renderHistoryRecord(record).trimEnd(),
+    renderHistoryRecord({ ...record, title: 'Conflicting title' }).trimEnd(),
+  ]);
+  const vault = fakeVault({ files: { 'Archive/conflicting.md': conflicting } });
+  const state = persisted();
+
+  const result = await runImport(
+    { data: state },
+    deps({ vault, visits: [input] }),
+  );
+
+  expect(result).toMatchObject({ imported: 1, alreadyPresent: 0, failedProfiles: [] });
+  expect(state.cursors[profile.sourceKey]?.sourceVisitId).toBe('871');
+  expect(vault.hasFile('Browser History/2026/2026-08.md')).toBe(true);
+});
+
+it('rejects a conflicting active Markdown destination without advancing its contributor', async () => {
+  const input = normalized({ sourceVisitId: '881' });
+  const record = recordFromVisit(input);
+  const path = 'Browser History/2026/2026-08.md';
+  const conflicting = newNote('2026-08', [
+    renderHistoryRecord(record).trimEnd(),
+    renderHistoryRecord({ ...record, url: 'https://conflict.example.test/' }).trimEnd(),
+  ]);
+  const vault = fakeVault({ files: { [path]: conflicting } });
+  const state = persisted();
+
+  const result = await runImport(
+    { data: state },
+    deps({ vault, visits: [input] }),
+  );
+
+  expect(result.imported).toBe(0);
+  expect(result.failedProfiles).toEqual([
+    expect.objectContaining({ sourceKey: profile.sourceKey }),
+  ]);
+  expect(state.cursors[profile.sourceKey]).toBeUndefined();
+  expect(vault.readText(path)).toBe(conflicting);
+});
+
+it.each(['json', 'csv'] as const)(
+  'rejects a conflicting active %s destination without using its IDs or advancing cursors',
+  async (outputFormat) => {
+    const input = normalized({ sourceVisitId: '891' });
+    const record = recordFromVisit(input);
+    const conflictingRecord = { ...record, title: 'Conflicting title' };
+    const path = `Browser History/2026/2026-08.${outputFormat}`;
+    let conflicting: string;
+    if (outputFormat === 'json') {
+      conflicting = JSON.stringify({
+        ...historyDocument({ records: [] }),
+        records: [record, conflictingRecord],
+      });
+    } else {
+      const firstRows = codecFor('csv').serialize(historyDocument({ records: [record] }))
+        .trimEnd().split('\r\n');
+      const conflictRows = codecFor('csv').serialize(historyDocument({
+        records: [conflictingRecord],
+      })).trimEnd().split('\r\n');
+      conflicting = `${firstRows[0]}\r\n${firstRows[1]}\r\n${conflictRows[1]}\r\n`;
+    }
+    const vault = fakeVault({ files: { [path]: conflicting } });
+    const state = persisted({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+        outputFormat,
+      },
+    });
+
+    const result = await runImport(
+      { data: state },
+      deps({ vault, visits: [input] }),
+    );
+
+    expect(result.imported).toBe(0);
+    expect(result.alreadyPresent).toBe(0);
+    expect(result.failedProfiles).toEqual([
+      expect.objectContaining({ sourceKey: profile.sourceKey }),
+    ]);
+    expect(state.cursors[profile.sourceKey]).toBeUndefined();
+    expect(vault.readText(path)).toBe(conflicting);
+  },
+);
 
 it('uses vault-wide markers across output folder, layout, period, timezone, and local path changes', async () => {
   const original = normalized({
@@ -743,6 +1128,40 @@ it('attributes a shared write failure to every contributor and commits unrelated
   expect(state.cursors[firstContributor.sourceKey]).toBeUndefined();
   expect(state.cursors[secondContributor.sourceKey]).toBeUndefined();
   expect(state.cursors[unrelated.sourceKey]?.sourceVisitId).toBe('3');
+});
+
+it('attributes a failed Markdown append to every profile contributing one shared sync ID', async () => {
+  const firstContributor = browserProfile('chrome:first-shared-id', {
+    profileId: 'shared-profile',
+    profileName: 'Shared profile',
+  });
+  const secondContributor = browserProfile('chrome:second-shared-id', {
+    profileId: 'shared-profile',
+    profileName: 'Shared profile',
+  });
+  const sharedVisit = normalizedFor(firstContributor, { sourceVisitId: '901' });
+  const secondVisit = normalizedFor(secondContributor, { sourceVisitId: '901' });
+  const path = 'Browser History/2026/2026-08.md';
+  const state = persisted();
+
+  const result = await runImport(
+    { data: state },
+    {
+      discover: async () => [firstContributor, secondContributor],
+      readVisits: async (candidate) => candidate.sourceKey === firstContributor.sourceKey
+        ? [sharedVisit]
+        : [secondVisit],
+      vault: fakeVault({ failAppend: path }),
+      saveData: async () => {},
+    },
+  );
+
+  expect(result.imported).toBe(0);
+  expect(result.failedProfiles.map(({ sourceKey }) => sourceKey).sort()).toEqual([
+    firstContributor.sourceKey,
+    secondContributor.sourceKey,
+  ].sort());
+  expect(state.cursors).toEqual({});
 });
 
 it('does not fail a profile whose shared-path candidate was already present', async () => {

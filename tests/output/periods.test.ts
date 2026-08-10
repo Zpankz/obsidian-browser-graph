@@ -94,12 +94,15 @@ it('applies fixed text around the period key in customized filenames', () => {
   ).toBe('History/2026/Browser history - 2026-08.md');
 });
 
-it('uses the selected format extension in destination paths', () => {
+it.each([
+  ['csv', 'Browser History/2026/2026-08.csv'],
+  ['json', 'Browser History/2026/2026-08.json'],
+] as const)('uses the selected %s extension in destination paths', (outputFormat, expected) => {
   expect(destinationPath({
     outputFolder: 'Browser History',
     fileNameTemplate: '{period}',
     layout: 'tiered',
     period: 'month',
-    outputFormat: 'json',
-  }, local('2026-08-03'))).toBe('Browser History/2026/2026-08.json');
+    outputFormat,
+  }, local('2026-08-03'))).toBe(expected);
 });

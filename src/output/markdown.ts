@@ -186,8 +186,8 @@ function metadataLine(field: 'original-title' | 'original-url', value: string): 
 }
 
 function originalUrlMarkerLine(record: BrowserHistoryRecord): string | undefined {
-  if (record.representation !== 'markdown_link') {
-    return undefined;
+  if (record.representation === 'inert_text') {
+    return metadataLine('original-url', record.url);
   }
   const rendered = safeUrl(record.url);
   return rendered.clickable && rendered.destination !== record.url

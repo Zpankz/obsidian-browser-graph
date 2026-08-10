@@ -295,6 +295,61 @@ it('reverses only generated escapes for inert records', () => {
   expect(serializeMarkdownDocument(parsed.document)).toBe(markdown);
 });
 
+it.each([
+  '',
+  'javascript:\u0001alert(1)',
+  'not   a\t URL',
+])('round-trips inert URL bytes exactly for %j', (url) => {
+  const record = historyRecord({
+    title: 'Inert destination',
+    url,
+    representation: 'inert_text',
+    sync: undefined,
+  });
+  const markdown = renderHistoryRecord(record);
+  const payload = Buffer.from(url).toString('base64url');
+
+  expect(markdown).toContain(
+    `  <!-- obsidian-browser-sync:original-url:${payload} -->`,
+  );
+  expect(parseMarkdownDocument(newNote('2026-08', [markdown.trimEnd()])).document.records[0])
+    .toEqual(record);
+});
+
+it('restores inert URL metadata only when it safely re-renders the visible line', () => {
+  const visible = historyRecord({
+    title: 'Inert destination',
+    url: 'visible value',
+    representation: 'inert_text',
+    sync: undefined,
+  });
+  const forgedUrl = 'different value';
+  const content = newNote('2026-08', [
+    `${renderHistoryRecord(visible).trimEnd()}\n` +
+      `  <!-- obsidian-browser-sync:original-url:${Buffer.from(forgedUrl).toString('base64url')} -->`,
+  ]);
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records[0]?.url).toBe(visible.url);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it('rejects conflicting semantic records with one sync ID but permits identical repeats', () => {
+  const record = historyRecord();
+  const conflicting = newNote('2026-08', [
+    renderHistoryRecord(record).trimEnd(),
+    renderHistoryRecord({ ...record, profile: 'Conflicting profile' }).trimEnd(),
+  ]);
+  const identical = newNote('2026-08', [
+    renderHistoryRecord(record).trimEnd(),
+    renderHistoryRecord({ ...record }).trimEnd(),
+  ]);
+
+  expect(() => parseMarkdownDocument(conflicting)).toThrow('sync ID');
+  expect(parseMarkdownDocument(identical).document.records)
+    .toEqual([record, record]);
+});
+
 it('leaves a non-adjacent marker unconsumed and does not assign it to a legacy entry', () => {
   const input = visit();
   const lines = renderVisit(input).trimEnd().split('\n');

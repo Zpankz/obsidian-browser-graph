@@ -55,3 +55,41 @@ it('accepts valid leap-day timestamps and day periods', () => {
 
   expect(parseJsonDocument(JSON.stringify(document)).document).toEqual(document);
 });
+
+it.each([
+  '2021-W53',
+  '2022-W53',
+  '0099',
+  '0099-12',
+])('rejects invalid or unsafe period %s', (period) => {
+  const document = historyDocument({
+    metadata: { ...historyDocument().metadata, period },
+  });
+
+  expect(() => parseJsonDocument(JSON.stringify(document)))
+    .toThrow('metadata.period');
+});
+
+it.each([
+  ['2020-W53'],
+  ['2026-W53'],
+  ['2026-W01'],
+])('accepts valid ISO week period %s', (period) => {
+  const document = historyDocument({
+    metadata: { ...historyDocument().metadata, period },
+  });
+
+  expect(parseJsonDocument(JSON.stringify(document)).document).toEqual(document);
+});
+
+it('rejects conflicting semantic records with one sync ID but permits identical repeats', () => {
+  const record = historyRecord();
+  const conflicting = historyDocument({
+    records: [record, { ...record, title: 'Conflicting title' }],
+  });
+  const identical = historyDocument({ records: [record, { ...record }] });
+
+  expect(() => parseJsonDocument(JSON.stringify(conflicting))).toThrow('sync ID');
+  expect(parseJsonDocument(JSON.stringify(identical)).document.records)
+    .toEqual([record, record]);
+});

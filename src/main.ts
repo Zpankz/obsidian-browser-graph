@@ -51,6 +51,7 @@ import {
   type ConversionSummary,
 } from './sync/converter';
 import { BrowserSyncOperationAlreadyRunningError } from './sync/operation-guard';
+import { normalizeSafeVaultPath } from './vault-path';
 
 export interface BrowserSyncRuntime {
   platform: DiscoveryPlatform;
@@ -211,7 +212,7 @@ export default class BrowserSyncPlugin extends Plugin {
       }
     } catch (error) {
       if (error instanceof BrowserSyncOperationAlreadyRunningError) {
-        runtime.notice('A browser history import is already running.');
+        runtime.notice('A Browser Sync operation is already running.');
         return;
       }
       if (isSafariPermissionDenial(error, runtime.platform)) {
@@ -530,15 +531,22 @@ function logConversionFailures(summary: ConversionSummary): void {
     'read-back',
     'read-destination',
     'read-source',
+    'routing-collision',
     'source-changed',
     'trash',
     'unmanaged-destination',
+    'user-content-destination',
     'validation',
     'write',
   ]);
-  const categories = [...new Set(summary.failed.map(({ category }) =>
-    safeCategories.has(category) ? category : 'unexpected'))].sort();
-  console.error('[Browser Sync] Conversion completed with failures', { categories });
+  for (const failure of summary.failed) {
+    console.error('[Browser Sync] Conversion file failed', {
+      path: normalizeSafeVaultPath(failure.path) ?? 'unknown',
+      category: safeCategories.has(failure.category)
+        ? failure.category
+        : 'unexpected',
+    });
+  }
 }
 
 function hasSafariPermissionDenial(

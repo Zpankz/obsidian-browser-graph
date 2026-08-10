@@ -15,6 +15,7 @@ import {
 import { codecFor, formatForPath, type OutputFormat } from '../output/codec';
 import {
   compareHistoryRecords,
+  ConflictingSyncIdError,
   reconcileRecords,
   recordFromVisit,
   type BrowserHistoryDocument,
@@ -74,6 +75,13 @@ interface DestinationGroup {
   candidates: Candidate[];
 }
 
+const MAX_STRUCTURED_WRITE_ATTEMPTS = 3;
+
+interface StructuredWriteResult {
+  alreadyPresent: Candidate[];
+  imported: Candidate[];
+}
+
 async function performImport(
   request: ImportRequest,
   dependencies: ImportDependencies,
@@ -126,41 +134,41 @@ async function performImport(
         managedIds,
         summary,
       );
-      contributors = contributorKeys(pending);
+      contributors = contributorKeysForIds(group.candidates, pending);
       if (pending.length === 0) {
         continue;
       }
 
-      const existing = await readExisting(dependencies.vault, path);
-      addDestinationIds(
-        managedIds,
-        settings.outputFormat,
-        existing,
-        group.label,
-      );
-      const pendingAfterRead = candidatesMissingFromIndex(
-        pending,
-        managedIds,
-        summary,
-      );
-      contributors = contributorKeys(pendingAfterRead);
-
-      if (pendingAfterRead.length > 0) {
-        const latestExisting = await readExisting(dependencies.vault, path);
+      if (settings.outputFormat === 'markdown') {
+        const existing = await readExisting(dependencies.vault, path);
         addDestinationIds(
           managedIds,
           settings.outputFormat,
-          latestExisting,
+          existing,
           group.label,
         );
-        const appendable = candidatesMissingFromIndex(
-          pendingAfterRead,
+        const pendingAfterRead = candidatesMissingFromIndex(
+          pending,
           managedIds,
           summary,
         );
-        contributors = contributorKeys(appendable);
-        if (appendable.length > 0) {
-          if (settings.outputFormat === 'markdown') {
+        contributors = contributorKeysForIds(group.candidates, pendingAfterRead);
+
+        if (pendingAfterRead.length > 0) {
+          const latestExisting = await readExisting(dependencies.vault, path);
+          addDestinationIds(
+            managedIds,
+            settings.outputFormat,
+            latestExisting,
+            group.label,
+          );
+          const appendable = candidatesMissingFromIndex(
+            pendingAfterRead,
+            managedIds,
+            summary,
+          );
+          contributors = contributorKeysForIds(group.candidates, appendable);
+          if (appendable.length > 0) {
             await appendEntries(
               dependencies.vault,
               path,
@@ -168,21 +176,25 @@ async function performImport(
               latestExisting,
               appendable.map((candidate) => renderHistoryRecord(candidate.record)),
             );
-          } else {
-            await writeStructuredEntries(
-              dependencies.vault,
-              path,
-              group.label,
-              settings.outputFormat,
-              latestExisting,
-              appendable.map((candidate) => candidate.record),
-            );
+            for (const candidate of appendable) {
+              managedIds.add(candidate.id);
+            }
+            summary.imported += appendable.length;
           }
-          for (const candidate of appendable) {
-            managedIds.add(candidate.id);
-          }
-          summary.imported += appendable.length;
         }
+      } else {
+        const result = await writeStructuredEntries(
+          dependencies.vault,
+          path,
+          group.label,
+          settings.outputFormat,
+          pending,
+        );
+        for (const candidate of [...result.alreadyPresent, ...result.imported]) {
+          managedIds.add(candidate.id);
+        }
+        summary.alreadyPresent += result.alreadyPresent.length;
+        summary.imported += result.imported.length;
       }
     } catch (error) {
       const message = errorMessage(error);
@@ -276,10 +288,8 @@ async function readManagedMarkerIndex(
     if (!format) {
       return;
     }
-    if (format === 'markdown' && !hasManagedMarkdownIdentity(content)) {
-      for (const id of extractImportedIds(content)) {
-        importedIds.add(id);
-      }
+    if (format === 'markdown') {
+      addIndexedMarkdownIds(importedIds, content);
       return;
     }
     try {
@@ -290,6 +300,23 @@ async function readManagedMarkerIndex(
     }
   }, root);
   return importedIds;
+}
+
+function addIndexedMarkdownIds(importedIds: Set<string>, content: string): void {
+  const extracted = extractImportedIds(content);
+  if (!hasManagedMarkdownIdentity(content)) {
+    addIds(importedIds, extracted);
+    return;
+  }
+  try {
+    const parsed = codecFor('markdown').parse(content);
+    addRecordIds(importedIds, parsed.document.records);
+    addIds(importedIds, extracted);
+  } catch (error) {
+    if (!(error instanceof ConflictingSyncIdError)) {
+      addIds(importedIds, extracted);
+    }
+  }
 }
 
 function candidatesMissingFromIndex(
@@ -316,6 +343,14 @@ function contributorKeys(candidates: Candidate[]): Set<string> {
   );
 }
 
+function contributorKeysForIds(
+  candidates: Candidate[],
+  pending: Candidate[],
+): Set<string> {
+  const pendingIds = new Set(pending.map((candidate) => candidate.id));
+  return contributorKeys(candidates.filter((candidate) => pendingIds.has(candidate.id)));
+}
+
 function addDestinationIds(
   importedIds: Set<string>,
   format: OutputFormat,
@@ -329,15 +364,20 @@ function addDestinationIds(
     if (hasManagedMarkdownIdentity(content)) {
       const parsed = codecFor(format).parse(content, { period });
       addRecordIds(importedIds, parsed.document.records);
+      addIds(importedIds, extractImportedIds(content));
     } else {
-      for (const id of extractImportedIds(content)) {
-        importedIds.add(id);
-      }
+      addIds(importedIds, extractImportedIds(content));
     }
     return;
   }
   const parsed = codecFor(format).parse(content, { period });
   addRecordIds(importedIds, parsed.document.records);
+}
+
+function addIds(importedIds: Set<string>, ids: Iterable<string>): void {
+  for (const id of ids) {
+    importedIds.add(id);
+  }
 }
 
 function hasManagedMarkdownIdentity(content: string): boolean {
@@ -361,22 +401,54 @@ async function writeStructuredEntries(
   path: string,
   period: string,
   format: Exclude<OutputFormat, 'markdown'>,
-  existing: string | undefined,
-  records: BrowserHistoryRecord[],
-): Promise<void> {
+  candidates: Candidate[],
+): Promise<StructuredWriteResult> {
   const codec = codecFor(format);
-  const parsedExisting = existing === undefined
-    ? undefined
-    : codec.parse(existing, { period }).document;
-  const mergedDocument = historyDocument(
-    period,
-    reconcileRecords([parsedExisting?.records ?? [], records]),
-    importedSourceFormat(parsedExisting),
-  );
-  const serialized = codec.serialize(mergedDocument);
-  codec.parse(serialized, { period });
   await ensureParentFolder(vault, path);
-  await vault.write(path, serialized);
+  for (
+    let attemptIndex = 0;
+    attemptIndex < MAX_STRUCTURED_WRITE_ATTEMPTS;
+    attemptIndex += 1
+  ) {
+    const snapshot = await readExisting(vault, path);
+    const parsedExisting = snapshot === undefined
+      ? undefined
+      : codec.parse(snapshot, { period }).document;
+    if (parsedExisting && parsedExisting.metadata.period !== period) {
+      throw new Error('Structured destination period does not match its managed path');
+    }
+    const existingIds = new Set(
+      (parsedExisting?.records ?? []).flatMap((record) =>
+        record.sync ? [record.sync.id] : []),
+    );
+    const imported = candidates.filter((candidate) => !existingIds.has(candidate.id));
+    const alreadyPresent = candidates.filter((candidate) => existingIds.has(candidate.id));
+    if (imported.length === 0) {
+      return { alreadyPresent, imported };
+    }
+
+    const mergedDocument = historyDocument(
+      period,
+      reconcileRecords([
+        parsedExisting?.records ?? [],
+        candidates.map((candidate) => candidate.record),
+      ]),
+      importedSourceFormat(parsedExisting),
+    );
+    const serialized = codec.serialize(mergedDocument);
+    const expectedDocument = codec.parse(serialized, { period }).document;
+    if (!await vault.writeIfUnchanged(path, snapshot, serialized)) {
+      continue;
+    }
+    const writtenDocument = codec.parse(await vault.read(path), { period }).document;
+    if (JSON.stringify(writtenDocument) !== JSON.stringify(expectedDocument)) {
+      throw new Error('Structured destination read-back did not match the validated write');
+    }
+    return { alreadyPresent, imported };
+  }
+  throw new Error(
+    `Structured destination changed during ${MAX_STRUCTURED_WRITE_ATTEMPTS} write attempts`,
+  );
 }
 
 function historyDocument(
