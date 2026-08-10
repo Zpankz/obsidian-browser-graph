@@ -244,7 +244,7 @@ function validateMetadata(value: unknown): BrowserHistoryDocument['metadata'] {
   if (value.browser_sync !== true) {
     throw new Error('metadata.browser_sync must be true');
   }
-  if (typeof value.period !== 'string' || !periodPattern.test(value.period)) {
+  if (typeof value.period !== 'string' || !isValidPeriod(value.period)) {
     throw new Error('metadata.period is invalid');
   }
   if (value.heading !== 'Browser history') {
@@ -273,9 +273,44 @@ function representationForUrl(value: string): VisitRepresentation {
 }
 
 function assertTimestamp(value: string): void {
-  if (!timestampPattern.test(value) || !Number.isFinite(Date.parse(value))) {
+  if (!timestampPattern.test(value)
+    || !hasValidCalendarDate(value.slice(0, 10))
+    || !Number.isFinite(Date.parse(value))) {
     throw new Error('record.timestamp must be a full local ISO timestamp');
   }
+}
+
+function isValidPeriod(value: string): boolean {
+  if (!periodPattern.test(value)) {
+    return false;
+  }
+  return value.length !== 10 || hasValidCalendarDate(value);
+}
+
+function hasValidCalendarDate(value: string): boolean {
+  const [yearText, monthText, dayText] = value.split('-');
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const daysInMonth = [
+    31,
+    isLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return day <= daysInMonth[month - 1];
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function assertString(value: unknown, field: string): asserts value is string {

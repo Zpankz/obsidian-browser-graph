@@ -32,3 +32,26 @@ it.each([2, 0, '1'])('rejects unsupported schema version %j', (schema_version) =
     records: [],
   }))).toThrow('schema_version');
 });
+
+it('rejects nonexistent calendar dates in record timestamps and day periods', () => {
+  const invalidTimestamp = historyDocument({
+    records: [historyRecord({ timestamp: '2026-02-31T12:00:00+03:00' })],
+  });
+  expect(() => parseJsonDocument(JSON.stringify(invalidTimestamp)))
+    .toThrow('record.timestamp');
+
+  const invalidPeriod = historyDocument({
+    metadata: { ...historyDocument().metadata, period: '2026-02-31' },
+  });
+  expect(() => parseJsonDocument(JSON.stringify(invalidPeriod)))
+    .toThrow('metadata.period');
+});
+
+it('accepts valid leap-day timestamps and day periods', () => {
+  const document = historyDocument({
+    metadata: { ...historyDocument().metadata, period: '2024-02-29' },
+    records: [historyRecord({ timestamp: '2024-02-29T12:00:00+03:00' })],
+  });
+
+  expect(parseJsonDocument(JSON.stringify(document)).document).toEqual(document);
+});
