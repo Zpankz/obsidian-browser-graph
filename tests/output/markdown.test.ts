@@ -62,6 +62,137 @@ it('round-trips modern marked and exact legacy unmarked entries', () => {
   expect(renderHistoryRecord(legacy)).not.toContain('<!-- obsidian-browser-sync:');
 });
 
+it('renders the canonical title and preserves a distinct original title in metadata', () => {
+  const record = historyRecord({
+    title: 'Canonical title',
+    original_title: 'Original title',
+  });
+  const markdown = renderHistoryRecord(record);
+
+  expect(markdown).toContain('[Canonical title](https://example.com/)');
+  expect(markdown).not.toContain('[Original title](');
+  expect(markdown).toContain(
+    `  <!-- obsidian-browser-sync:original-title:${Buffer.from('Original title').toString('base64url')} -->`,
+  );
+  expect(parseMarkdownDocument(newNote('2026-08', [markdown.trimEnd()])).document.records[0])
+    .toEqual(record);
+});
+
+it.each([
+  '',
+  "apostrophe's title",
+  'Café 東京 🚀',
+])('round-trips present original_title metadata %j', (original_title) => {
+  const record = historyRecord({ original_title, sync: undefined });
+  const markdown = renderHistoryRecord(record);
+  const payload = Buffer.from(original_title).toString('base64url');
+
+  expect(markdown).toContain(
+    `  <!-- obsidian-browser-sync:original-title:${payload} -->`,
+  );
+  expect(parseMarkdownDocument(newNote('2026-08', [markdown.trimEnd()])).document.records[0])
+    .toEqual(record);
+});
+
+it.each([
+  ['https://example.com/a b', 'https://example.com/a%20b'],
+  ['https://example.com/café', 'https://example.com/caf%C3%A9'],
+])('keeps canonical URL spellings distinct for %s and %s', (rawUrl, encodedUrl) => {
+  const rawRecord = historyRecord({ url: rawUrl, sync: undefined });
+  const encodedRecord = historyRecord({ url: encodedUrl, sync: undefined });
+  const rawMarkdown = renderHistoryRecord(rawRecord);
+  const encodedMarkdown = renderHistoryRecord(encodedRecord);
+
+  expect(rawMarkdown).toContain(
+    `  <!-- obsidian-browser-sync:original-url:${Buffer.from(rawUrl).toString('base64url')} -->`,
+  );
+  expect(encodedMarkdown).not.toContain('obsidian-browser-sync:original-url:');
+  expect(parseMarkdownDocument(newNote('2026-08', [rawMarkdown.trimEnd()])).document.records[0])
+    .toEqual(rawRecord);
+  expect(parseMarkdownDocument(newNote('2026-08', [encodedMarkdown.trimEnd()])).document.records[0])
+    .toEqual(encodedRecord);
+});
+
+it('writes generated metadata in deterministic order', () => {
+  const record = historyRecord({
+    title: '',
+    original_title: '',
+    url: 'https://example.com/a b',
+  });
+  const lines = renderHistoryRecord(record).trimEnd().split('\n');
+
+  expect(lines.slice(1)).toEqual([
+    `  <!-- obsidian-browser-sync:${record.sync?.browser}:${record.sync?.id} -->`,
+    '  <!-- obsidian-browser-sync:title-empty -->',
+    '  <!-- obsidian-browser-sync:original-title: -->',
+    `  <!-- obsidian-browser-sync:original-url:${Buffer.from(record.url).toString('base64url')} -->`,
+  ]);
+  expect(parseMarkdownDocument(
+    newNote('2026-08', [renderHistoryRecord(record).trimEnd()]),
+  ).document.records[0]).toEqual(record);
+});
+
+it('round-trips slash-bearing browser and profile labels unambiguously', () => {
+  const record = historyRecord({
+    browser: 'Chrome / Beta',
+    profile: 'Work / Personal',
+    sync: undefined,
+  });
+  const markdown = renderHistoryRecord(record);
+
+  expect(markdown).toContain('— Chrome &#47; Beta / Work &#47; Personal\n');
+  expect(parseMarkdownDocument(newNote('2026-08', [markdown.trimEnd()])).document.records[0])
+    .toEqual(record);
+});
+
+it('rejects a pre-existing visit line with ambiguous browser/profile separators', () => {
+  const content = `${newNote('2026-08', [])}- 2026-08-03T15:34:56+03:00 [Example](https://example.com/) — Chrome / Beta / Default\n`;
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records).toEqual([]);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it.each([
+  (originalTitle: string, originalUrl: string) =>
+    `\n\n  <!-- obsidian-browser-sync:original-title:${originalTitle} -->\n` +
+      `  <!-- obsidian-browser-sync:original-url:${originalUrl} -->`,
+  (originalTitle: string, originalUrl: string) =>
+    `\n\`\`\`html\n  <!-- obsidian-browser-sync:original-title:${originalTitle} -->\n` +
+      `  <!-- obsidian-browser-sync:original-url:${originalUrl} -->\n\`\`\``,
+])('ignores fenced or non-adjacent value metadata', (suffixFor) => {
+  const visibleRecord = historyRecord({
+    url: 'https://example.com/a%20b',
+    sync: undefined,
+  });
+  delete visibleRecord.sync;
+  const suffix = suffixFor(
+    Buffer.from('User-authored title').toString('base64url'),
+    Buffer.from('https://example.com/a b').toString('base64url'),
+  );
+  const content = newNote(
+    '2026-08',
+    [`${renderHistoryRecord(visibleRecord).trimEnd()}${suffix}`],
+  );
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records[0]).toEqual(visibleRecord);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it('leaves invalid adjacent value metadata unrecognized without throwing', () => {
+  const record = historyRecord({ sync: undefined });
+  delete record.sync;
+  const content = newNote('2026-08', [
+    `${renderHistoryRecord(record).trimEnd()}\n` +
+      '  <!-- obsidian-browser-sync:original-title:_w -->',
+  ]);
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records[0]).toEqual(record);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
 it('round-trips a blank modern title with exact metadata after the sync marker', () => {
   const record = historyRecord({ title: '' });
   const document = historyDocument({
@@ -273,7 +404,7 @@ it('escapes raw HTML from titles and browser/profile labels', () => {
     '&lt;img src=x onerror=&quot;alert\\(1\\)&quot;&gt; &amp; history',
   );
   expect(markdown).toContain(
-    '— &lt;script&gt;alert\\(2\\)&lt;/script&gt; / Work &amp; &lt;admin&gt;',
+    '— &lt;script&gt;alert\\(2\\)&lt;&#47;script&gt; / Work &amp; &lt;admin&gt;',
   );
   expect(markdown).not.toContain('<img');
   expect(markdown).not.toContain('<script>');
@@ -374,7 +505,9 @@ it('extracts only valid sync markers', () => {
     extractImportedIds(
       '<!-- obsidian-browser-sync:chrome:1234567890abcdef12345678 -->\n' +
         '<!-- obsidian-browser-sync:chrome:NOT-VALID -->\n' +
-        '  <!-- obsidian-browser-sync:title-empty -->',
+        '  <!-- obsidian-browser-sync:title-empty -->\n' +
+        '<!-- obsidian-browser-sync:original-title:aaaaaaaaaaaaaaaaaaaaaaaa -->\n' +
+        '<!-- obsidian-browser-sync:original-url:bbbbbbbbbbbbbbbbbbbbbbbb -->',
     ),
   ).toEqual(new Set(['1234567890abcdef12345678']));
 });

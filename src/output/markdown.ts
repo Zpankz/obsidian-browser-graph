@@ -14,6 +14,8 @@ import {
 const MARKER_LINE = /^ {0,3}<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->[ ]*$/;
 const GENERATED_MARKER_LINE = /^ {2}<!-- obsidian-browser-sync:(safari|firefox|chrome|edge|brave|chromium|vivaldi):([a-f0-9]{24}) -->$/;
 const TITLE_EMPTY_MARKER_LINE = '  <!-- obsidian-browser-sync:title-empty -->';
+const ORIGINAL_TITLE_MARKER_LINE = /^ {2}<!-- obsidian-browser-sync:original-title:([A-Za-z0-9_-]*) -->$/;
+const ORIGINAL_URL_MARKER_LINE = /^ {2}<!-- obsidian-browser-sync:original-url:([A-Za-z0-9_-]*) -->$/;
 const VISIT_LINE = /^- (\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d[+-](?:[01]\d|2[0-3]):[0-5]\d) (.+)$/;
 const MANAGED_ENVELOPE_LINES = [
   '---',
@@ -46,10 +48,11 @@ function safeTitle(title: string): string {
   return safeLabel(title);
 }
 
-function safeLabel(label: string): string {
-  return escapeMarkdownInline(escapeHtml(
+function safeLabel(label: string, encodeSlash = false): string {
+  const html = escapeHtml(
     replaceControlCharacters(label, ' ').replace(/\s+/g, ' ').trim(),
-  ));
+  );
+  return escapeMarkdownInline(encodeSlash ? html.replace(/\//g, '&#47;') : html);
 }
 
 function escapeMarkdownInline(value: string): string {
@@ -104,11 +107,12 @@ function safeUrl(url: string): SafeUrl {
     if (normalized.protocol !== 'http:' && normalized.protocol !== 'https:') {
       return { clickable: false, display: inertCodeSpan(url) };
     }
-    const destination = escapeMarkdownDestination(normalized.toString());
+    const normalizedUrl = normalized.toString();
+    const destination = escapeMarkdownDestination(normalizedUrl);
     return {
       clickable: true,
       destination,
-      display: safeTitle(normalized.toString()),
+      display: safeTitle(normalizedUrl),
     };
   } catch {
     return { clickable: false, display: inertCodeSpan(url) };
@@ -136,18 +140,15 @@ export function renderVisit(visit: NormalizedVisit): string {
 
 export function renderHistoryRecord(input: BrowserHistoryRecord): string {
   const record = validateBrowserHistoryRecord(input);
-  const syncMarker = record.sync
-    ? `  <!-- obsidian-browser-sync:${record.sync.browser}:${record.sync.id} -->\n`
-    : '';
-  const titleMarker = record.title === '' ? `${TITLE_EMPTY_MARKER_LINE}\n` : '';
-  return `${renderedVisitLine(record)}\n${syncMarker}${titleMarker}`;
+  const metadata = generatedMetadataLines(record);
+  return `${renderedVisitLine(record)}\n${metadata.map((line) => `${line}\n`).join('')}`;
 }
 
 function renderedVisitLine(record: BrowserHistoryRecord): string {
   const url: SafeUrl = record.representation === 'markdown_link'
     ? safeUrl(record.url)
     : { clickable: false, display: inertCodeSpan(record.url) };
-  const title = safeTitle(record.original_title ?? record.title)
+  const title = safeTitle(record.title)
     || url.display
     || 'Untitled visit';
   const visibleVisit = url.clickable
@@ -155,9 +156,47 @@ function renderedVisitLine(record: BrowserHistoryRecord): string {
     : title === url.display || url.display.length === 0
       ? title
       : `${title} — ${url.display}`;
-  const browserName = safeLabel(record.browser);
-  const profileName = safeLabel(record.profile);
+  const browserName = safeLabel(record.browser, true);
+  const profileName = safeLabel(record.profile, true);
   return `- ${record.timestamp} ${visibleVisit} — ${browserName} / ${profileName}`;
+}
+
+function generatedMetadataLines(record: BrowserHistoryRecord): string[] {
+  const lines: string[] = [];
+  if (record.sync) {
+    lines.push(
+      `  <!-- obsidian-browser-sync:${record.sync.browser}:${record.sync.id} -->`,
+    );
+  }
+  if (record.title === '') {
+    lines.push(TITLE_EMPTY_MARKER_LINE);
+  }
+  if (record.original_title !== undefined) {
+    lines.push(metadataLine('original-title', record.original_title));
+  }
+  const originalUrlMarker = originalUrlMarkerLine(record);
+  if (originalUrlMarker) {
+    lines.push(originalUrlMarker);
+  }
+  return lines;
+}
+
+function metadataLine(field: 'original-title' | 'original-url', value: string): string {
+  return `  <!-- obsidian-browser-sync:${field}:${encodeMetadataValue(value)} -->`;
+}
+
+function originalUrlMarkerLine(record: BrowserHistoryRecord): string | undefined {
+  if (record.representation !== 'markdown_link') {
+    return undefined;
+  }
+  const rendered = safeUrl(record.url);
+  return rendered.clickable && rendered.destination !== record.url
+    ? metadataLine('original-url', record.url)
+    : undefined;
+}
+
+function encodeMetadataValue(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64url');
 }
 
 export function extractImportedIds(markdown: string): Set<string> {
@@ -184,7 +223,7 @@ export function extractImportedIds(markdown: string): Set<string> {
     }
 
     const marker = MARKER_LINE.exec(line);
-    if (marker) {
+    if (marker && marker[1] !== 'original-title' && marker[1] !== 'original-url') {
       importedIds.add(marker[2]);
     }
   }
@@ -246,9 +285,36 @@ export function parseMarkdownDocument(content: string): ManagedDocumentParse {
       metadataIndex += 1;
     }
     if (envelope.bodyLines[metadataIndex] === TITLE_EMPTY_MARKER_LINE) {
-      preserveBlankTitleRepresentation(record, line);
+      const visibleTitle = record.title;
+      record.title = '';
+      if (isExactRenderedLine(record, line)) {
+        consumed.add(metadataIndex);
+        metadataIndex += 1;
+      } else {
+        record.title = visibleTitle;
+      }
+    }
+    const originalTitle = metadataValue(
+      envelope.bodyLines[metadataIndex] ?? '',
+      ORIGINAL_TITLE_MARKER_LINE,
+    );
+    if (originalTitle !== undefined) {
+      record.original_title = originalTitle;
       consumed.add(metadataIndex);
       metadataIndex += 1;
+    }
+    const originalUrlLine = envelope.bodyLines[metadataIndex] ?? '';
+    const originalUrl = metadataValue(originalUrlLine, ORIGINAL_URL_MARKER_LINE);
+    if (originalUrl !== undefined) {
+      const visibleUrl = record.url;
+      record.url = originalUrl;
+      if (originalUrlMarkerLine(record) === originalUrlLine
+        && isExactRenderedLine(record, line)) {
+        consumed.add(metadataIndex);
+        metadataIndex += 1;
+      } else {
+        record.url = visibleUrl;
+      }
     }
     index = metadataIndex - 1;
     records.push(validateBrowserHistoryRecord(record));
@@ -297,13 +363,13 @@ function recordFromGeneratedLine(line: string): BrowserHistoryRecord | undefined
   if (!visit) {
     return undefined;
   }
-  const separatorIndexes = indexesOf(visit[2], ' — ');
-  for (const visitSeparator of separatorIndexes) {
+  const candidates: BrowserHistoryRecord[] = [];
+  for (const visitSeparator of indexesOf(visit[2], ' — ')) {
     const visible = visit[2].slice(0, visitSeparator);
     const labels = visit[2].slice(visitSeparator + 3);
     for (const profileSeparator of indexesOf(labels, ' / ')) {
-      const browser = decodeGeneratedLabel(labels.slice(0, profileSeparator));
-      const profile = decodeGeneratedLabel(labels.slice(profileSeparator + 3));
+      const browser = decodeGeneratedLabel(labels.slice(0, profileSeparator), true);
+      const profile = decodeGeneratedLabel(labels.slice(profileSeparator + 3), true);
       const visibleVisit = parseVisibleVisit(visible);
       if (browser === undefined || profile === undefined || !visibleVisit) {
         continue;
@@ -317,11 +383,11 @@ function recordFromGeneratedLine(line: string): BrowserHistoryRecord | undefined
         representation: visibleVisit.representation,
       };
       if (isExactRenderedLine(record, line)) {
-        return record;
+        candidates.push(record);
       }
     }
   }
-  return undefined;
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function isExactRenderedLine(record: BrowserHistoryRecord, line: string): boolean {
@@ -329,14 +395,6 @@ function isExactRenderedLine(record: BrowserHistoryRecord, line: string): boolea
     return renderedVisitLine(validateBrowserHistoryRecord(record)) === line;
   } catch {
     return false;
-  }
-}
-
-function preserveBlankTitleRepresentation(record: BrowserHistoryRecord, line: string): void {
-  const renderedTitle = record.title;
-  record.title = '';
-  if (renderedVisitLine(record) !== line) {
-    record.original_title = renderedTitle;
   }
 }
 
@@ -375,15 +433,14 @@ function parseGeneratedLink(value: string): VisibleVisit | undefined {
     const renderedTitle = value.slice(1, separator);
     const destination = value.slice(separator + 2, -1);
     const title = decodeGeneratedLabel(renderedTitle);
-    const url = canonicalUrlFromDestination(destination);
-    if (title === undefined || url === undefined) {
+    if (title === undefined) {
       continue;
     }
-    const renderedUrl = safeUrl(url);
+    const renderedUrl = safeUrl(destination);
     if (renderedUrl.clickable && `[${renderedTitle}](${renderedUrl.destination})` === value) {
       return {
         title,
-        url,
+        url: destination,
         representation: 'markdown_link',
       };
     }
@@ -391,35 +448,33 @@ function parseGeneratedLink(value: string): VisibleVisit | undefined {
   return undefined;
 }
 
-function canonicalUrlFromDestination(destination: string): string | undefined {
-  const candidates = [decodeUri(destination), destination];
-  return candidates.find((candidate) => {
-    const rendered = safeUrl(candidate);
-    return rendered.clickable && rendered.destination === destination;
-  });
-}
-
-function decodeUri(value: string): string {
-  try {
-    return decodeURI(value);
-  } catch {
-    return value;
-  }
-}
-
-function decodeGeneratedLabel(value: string): string | undefined {
+function decodeGeneratedLabel(value: string, encodedSlash = false): string | undefined {
   const markdownDecoded = value.replace(/\\([\\`*_[\]{}()!])/g, '$1');
   const decoded = markdownDecoded.replace(
-    /&(?:amp|lt|gt|quot|#39);/g,
+    encodedSlash ? /&(?:amp|lt|gt|quot|#39|#47);/g : /&(?:amp|lt|gt|quot|#39);/g,
     (entity) => ({
       '&amp;': '&',
       '&lt;': '<',
       '&gt;': '>',
       '&quot;': '"',
       '&#39;': "'",
+      '&#47;': '/',
     })[entity] as string,
   );
-  return safeLabel(decoded) === value ? decoded : undefined;
+  return safeLabel(decoded, encodedSlash) === value ? decoded : undefined;
+}
+
+function metadataValue(value: string, pattern: RegExp): string | undefined {
+  const payload = pattern.exec(value)?.[1];
+  if (payload === undefined) {
+    return undefined;
+  }
+  try {
+    const decoded = Buffer.from(payload, 'base64url').toString('utf8');
+    return encodeMetadataValue(decoded) === payload ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function decodeInertCodeSpan(value: string): string | undefined {
