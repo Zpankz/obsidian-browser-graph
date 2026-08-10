@@ -3,10 +3,108 @@ import {
   extractImportedIds,
   formatLocalIsoTimestamp,
   newNote,
+  parseMarkdownDocument,
+  renderHistoryRecord,
   renderVisit,
+  serializeMarkdownDocument,
   stableVisitId,
 } from '../../src/output/markdown';
+import { recordFromVisit } from '../../src/output/document';
+import { historyDocument, historyRecord } from '../helpers/history-documents';
 import { visit } from '../helpers/visits';
+
+it('parses generated entries into raw canonical values and sync metadata', () => {
+  const input = visit({ title: '[unsafe]', url: 'https://example.com/a b' });
+  const content = newNote('2026-08', [renderVisit(input).trimEnd()]);
+  const parsed = parseMarkdownDocument(content);
+  expect(parsed.document.records[0]).toMatchObject({
+    title: '[unsafe]',
+    url: 'https://example.com/a b',
+    sync: { id: stableVisitId(input) },
+  });
+  expect(parsed.hasUnrecognizedContent).toBe(false);
+});
+
+it('reports user-authored content without treating marker examples as records', () => {
+  const content = `${newNote('2026-08', [])}My private note\n`;
+  const parsed = parseMarkdownDocument(content);
+  expect(parsed.document.records).toEqual([]);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it('does not parse generated-looking marker examples inside fenced code', () => {
+  const input = visit();
+  const content = `${newNote('2026-08', [])}\`\`\`markdown\n${renderVisit(input)}\`\`\`\n`;
+  const parsed = parseMarkdownDocument(content);
+  expect(parsed.document.records).toEqual([]);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it('round-trips modern marked and exact legacy unmarked entries', () => {
+  const modern = recordFromVisit(visit({ title: 'Modern [entry]' }));
+  const legacy = historyRecord({
+    timestamp: '2026-08-03T08:00:00+03:00',
+    title: 'Legacy entry',
+    sync: undefined,
+  });
+  const document = historyDocument({
+    metadata: {
+      ...historyDocument().metadata,
+      source_format: 'obsidian_browser_sync_markdown',
+    },
+    records: [modern, legacy],
+  });
+
+  const markdown = serializeMarkdownDocument(document);
+  const parsed = parseMarkdownDocument(markdown);
+  expect(parsed.document).toEqual(document);
+  expect(parsed.hasUnrecognizedContent).toBe(false);
+  expect(renderHistoryRecord(legacy)).not.toContain('<!-- obsidian-browser-sync:');
+});
+
+it('reverses only generated escapes for inert records', () => {
+  const input = visit({
+    title: '<unsafe> [label]',
+    url: 'javascript:alert(`unsafe`)',
+    browserName: 'Browser & <name>',
+    profileName: 'Profile [one]',
+  });
+  const markdown = newNote('2026-08', [renderVisit(input).trimEnd()]);
+  const parsed = parseMarkdownDocument(markdown);
+
+  expect(parsed.document.records[0]).toMatchObject({
+    title: '<unsafe> [label]',
+    url: 'javascript:alert(`unsafe`)',
+    browser: 'Browser & <name>',
+    profile: 'Profile [one]',
+    representation: 'inert_text',
+  });
+  expect(serializeMarkdownDocument(parsed.document)).toBe(markdown);
+});
+
+it('leaves a non-adjacent marker unconsumed and does not assign it to a legacy entry', () => {
+  const input = visit();
+  const lines = renderVisit(input).trimEnd().split('\n');
+  const content = newNote('2026-08', [`${lines[0]}\n\n${lines[1]}`]);
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records[0].sync).toBeUndefined();
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
+it('rejects notes without the exact managed envelope', () => {
+  expect(() => parseMarkdownDocument(
+    newNote('2026-08', []).replace('# Browser history', '# My history'),
+  )).toThrow('envelope');
+});
+
+it('reports generated-looking lines with invalid record values as unrecognized content', () => {
+  const content = `${newNote('2026-08', [])}- 2026-02-31T12:00:00+03:00 [Title](https://example.com/) — Chrome / Default\n`;
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records).toEqual([]);
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
 
 it('keeps repeated URL visits distinct and IDs deterministic', () => {
   const first = visit({
