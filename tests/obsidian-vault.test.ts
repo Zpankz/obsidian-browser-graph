@@ -31,6 +31,7 @@ interface FakeObsidianVault extends Pick<
   | 'read'
   | 'append'
   | 'modify'
+  | 'process'
   | 'trash'
   | 'getFiles'
 > {
@@ -84,6 +85,11 @@ function fakeObsidianVault(): FakeObsidianVault {
     },
     modify: vi.fn(async (file: TFile, content: string) => {
       contents.set(file.path, content);
+    }),
+    process: vi.fn(async (file: TFile, updater: (data: string) => string) => {
+      const updated = updater(contents.get(file.path) ?? '');
+      contents.set(file.path, updated);
+      return updated;
     }),
     trash: vi.fn(async (file: TFile) => {
       files.delete(file.path);
@@ -177,6 +183,48 @@ describe('ObsidianVaultPort', () => {
     expect(api.createdFiles).toContainEqual({ path: 'History/new.csv', content: 'new' });
   });
 
+  it('conditionally replaces an existing file through the atomic process API', async () => {
+    const path = 'History/2026-08.json';
+    api.files.set(path, new TFile(path));
+    api.contents.set(path, 'first');
+
+    await expect(vault.writeIfUnchanged(path, 'first', 'second'))
+      .resolves.toBe(true);
+    await expect(vault.writeIfUnchanged(path, 'stale', 'third'))
+      .resolves.toBe(false);
+
+    expect(api.process).toHaveBeenCalledTimes(2);
+    expect(api.contents.get(path)).toBe('second');
+  });
+
+  it('reports an expected-absent create collision without replacing the winner', async () => {
+    const path = 'History/2026-08.json';
+    api.create = vi.fn(async (candidatePath) => {
+      api.files.set(candidatePath, new TFile(candidatePath));
+      api.contents.set(candidatePath, 'concurrent');
+      throw new Error('File already exists');
+    });
+
+    await expect(vault.writeIfUnchanged(path, undefined, 'replacement'))
+      .resolves.toBe(false);
+    expect(api.contents.get(path)).toBe('concurrent');
+  });
+
+  it('does not replace a folder and propagates unrelated create failures', async () => {
+    const folderPath = 'History/2026-08.json';
+    api.files.set(folderPath, new TFolder(folderPath));
+
+    await expect(vault.writeIfUnchanged(folderPath, undefined, 'replacement'))
+      .resolves.toBe(false);
+
+    const missingPath = 'History/missing.json';
+    api.create = vi.fn(async () => {
+      throw new Error('Vault is read-only');
+    });
+    await expect(vault.writeIfUnchanged(missingPath, undefined, 'replacement'))
+      .rejects.toThrow('Vault is read-only');
+  });
+
   it('rechecks after a concurrent folder creator wins the race', async () => {
     api.raceFolder = 'Browser History/2026';
 
@@ -225,6 +273,8 @@ describe('ObsidianVaultPort', () => {
     await expect(vault.ensureFolder(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.create(path, '')).rejects.toThrow('Unsafe vault path');
     await expect(vault.write(path, '')).rejects.toThrow('Unsafe vault path');
+    await expect(vault.writeIfUnchanged(path, undefined, ''))
+      .rejects.toThrow('Unsafe vault path');
     await expect(vault.append(path, '')).rejects.toThrow('Unsafe vault path');
     await expect(vault.trash(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.read(path)).rejects.toThrow('Unsafe vault path');

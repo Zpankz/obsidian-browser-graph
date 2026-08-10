@@ -70,6 +70,11 @@ export interface VaultPort {
   read(path: string): Promise<string>;
   create(path: string, content: string): Promise<void>;
   write(path: string, content: string): Promise<void>;
+  writeIfUnchanged(
+    path: string,
+    expected: string | undefined,
+    content: string,
+  ): Promise<boolean>;
   append(path: string, content: string): Promise<void>;
   trash(path: string): Promise<void>;
   ensureFolder(path: string): Promise<void>;

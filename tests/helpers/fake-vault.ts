@@ -4,6 +4,10 @@ import { destinationPath, periodFor } from '../../src/output/periods';
 import { DEFAULT_SETTINGS } from '../../src/settings';
 
 export interface FakeVaultOptions {
+  conditionalWriteInterference?: {
+    path: string;
+    contents: string[];
+  };
   failAppend?: string;
   failTrash?: string;
   failWrite?: string;
@@ -19,6 +23,12 @@ export interface FakeVault extends VaultPort {
 export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
   const files = new Map(Object.entries(options.files ?? {}));
   const trashed: string[] = [];
+  const conditionalWriteInterference = options.conditionalWriteInterference
+    ? {
+      path: options.conditionalWriteInterference.path,
+      contents: [...options.conditionalWriteInterference.contents],
+    }
+    : undefined;
 
   return {
     async exists(path) {
@@ -43,6 +53,20 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
         throw new Error(`Could not write: ${path}`);
       }
       files.set(path, content);
+    },
+    async writeIfUnchanged(path, expected, content) {
+      if (path === options.failWrite) {
+        throw new Error(`Could not write: ${path}`);
+      }
+      if (conditionalWriteInterference?.path === path
+        && conditionalWriteInterference.contents.length > 0) {
+        files.set(path, conditionalWriteInterference.contents.shift() as string);
+      }
+      if (files.get(path) !== expected) {
+        return false;
+      }
+      files.set(path, content);
+      return true;
     },
     async append(path, content) {
       if (path === options.failAppend) {

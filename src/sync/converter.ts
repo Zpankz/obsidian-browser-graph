@@ -37,6 +37,8 @@ interface DestinationGroup {
   sources: ManagedSource[];
 }
 
+const MAX_DESTINATION_WRITE_ATTEMPTS = 3;
+
 export async function convertExistingExports(
   request: ConversionRequest,
   dependencies: ConversionDependencies,
@@ -86,65 +88,89 @@ async function performConversion(
       summary.failed.push({ path: group.path, category: 'unmanaged-destination' });
       continue;
     }
-    if (!await refreshDestination(group, settings.outputFormat, vault, summary)) {
-      continue;
-    }
-    if (group.sources.length === 0) {
-      continue;
-    }
-    const targetSource = group.sources.find((source) => source.path === group.path);
+    let completed = false;
+    for (
+      let attemptIndex = 0;
+      attemptIndex < MAX_DESTINATION_WRITE_ATTEMPTS;
+      attemptIndex += 1
+    ) {
+      if (!await refreshDestination(group, settings.outputFormat, vault, summary)) {
+        break;
+      }
+      if (group.sources.length === 0) {
+        break;
+      }
+      const targetSource = group.sources.find(
+        (source) => source.path === group.path,
+      );
+      const destination = attempt(
+        () => mergedDocument(group),
+        'conflict',
+        group.path,
+        summary,
+      );
+      if (!destination) {
+        break;
+      }
+      const codec = codecFor(settings.outputFormat);
+      const serialized = attempt(
+        () => {
+          const candidate = codec.serialize(destination);
+          codec.parse(candidate, { period: group.period });
+          return candidate;
+        },
+        'validation',
+        group.path,
+        summary,
+      );
+      if (serialized === undefined) {
+        break;
+      }
 
-    const destination = attempt(
-      () => mergedDocument(group),
-      'conflict',
-      group.path,
-      summary,
-    );
-    if (!destination) {
-      continue;
-    }
-    const codec = codecFor(settings.outputFormat);
-    const serialized = attempt(
-      () => {
-        const candidate = codec.serialize(destination);
-        codec.parse(candidate, { period: group.period });
-        return candidate;
-      },
-      'validation',
-      group.path,
-      summary,
-    );
-    if (serialized === undefined) {
-      continue;
-    }
+      const current = targetSource?.content === serialized;
+      if (!current) {
+        let replaced: boolean;
+        try {
+          await ensureParentFolder(vault, group.path);
+          replaced = await vault.writeIfUnchanged(
+            group.path,
+            targetSource?.content,
+            serialized,
+          );
+        } catch {
+          summary.failed.push({ path: group.path, category: 'write' });
+          break;
+        }
+        if (!replaced) {
+          if (attemptIndex === MAX_DESTINATION_WRITE_ATTEMPTS - 1) {
+            summary.failed.push({ path: group.path, category: 'concurrency' });
+          }
+          continue;
+        }
+      }
 
-    const current = targetSource?.content === serialized;
-    if (!current) {
       try {
-        await ensureParentFolder(vault, group.path);
-        await vault.write(group.path, serialized);
+        const written = codec.parse(await vault.read(group.path), {
+          period: group.period,
+        }).document;
+        if (JSON.stringify(written) !== JSON.stringify(destination)) {
+          throw new Error('Destination does not match the converted document');
+        }
       } catch {
-        summary.failed.push({ path: group.path, category: 'write' });
-        continue;
+        summary.failed.push({ path: group.path, category: 'read-back' });
+        break;
       }
-    }
 
-    try {
-      const written = codec.parse(await vault.read(group.path), {
-        period: group.period,
-      }).document;
-      if (JSON.stringify(written) !== JSON.stringify(destination)) {
-        throw new Error('Destination does not match the converted document');
+      if (current) {
+        summary.alreadyCurrent += 1;
+      } else {
+        summary.converted += 1;
       }
-    } catch {
-      summary.failed.push({ path: group.path, category: 'read-back' });
+      completed = true;
+      break;
+    }
+    if (!completed) {
       continue;
-    }
-
-    if (current) {
-      summary.alreadyCurrent += 1;
-    } else {
-      summary.converted += 1;
     }
 
     const originalSources = group.sources.filter(

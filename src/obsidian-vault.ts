@@ -36,6 +36,42 @@ export class ObsidianVaultPort implements VaultPort {
     await this.vault.modify(existing, content);
   }
 
+  async writeIfUnchanged(
+    path: string,
+    expected: string | undefined,
+    content: string,
+  ): Promise<boolean> {
+    const normalized = this.safeVaultPath(path);
+    const existing = this.vault.getAbstractFileByPath(normalized);
+    if (expected === undefined) {
+      if (existing !== null) {
+        return false;
+      }
+      try {
+        await this.vault.create(normalized, content);
+        return true;
+      } catch (error) {
+        if (this.vault.getAbstractFileByPath(normalized) !== null) {
+          return false;
+        }
+        throw error;
+      }
+    }
+    if (!(existing instanceof TFile)) {
+      return false;
+    }
+
+    let replaced = false;
+    await this.vault.process(existing, (current) => {
+      if (current !== expected) {
+        return current;
+      }
+      replaced = true;
+      return content;
+    });
+    return replaced;
+  }
+
   async append(path: string, content: string): Promise<void> {
     await this.vault.append(this.fileAt(path), content);
   }

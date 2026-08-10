@@ -398,6 +398,159 @@ it('rechecks and merges a destination that appears after the scan', async () => 
     .toEqual([sourceRecord, concurrentRecord]);
 });
 
+it('retries and merges a managed destination created at the conditional write', async () => {
+  const sourceRecord = historyRecord();
+  const concurrentRecord = historyRecord({
+    timestamp: '2026-08-03T15:35:56+03:00',
+    sync: {
+      namespace: 'obsidian-browser-sync',
+      browser: 'chrome',
+      id: '111111111111111111111111',
+    },
+  });
+  const source = 'Browser History/source.md';
+  const target = 'Browser History/2026/2026-08.json';
+  const vault = fakeVault({
+    files: {
+      [source]: serializeMarkdownDocument(historyDocument({
+        metadata: {
+          ...historyDocument().metadata,
+          source_format: 'obsidian_browser_sync_markdown',
+        },
+        records: [sourceRecord],
+      })),
+    },
+    conditionalWriteInterference: {
+      path: target,
+      contents: [serializeJsonDocument(historyDocument({
+        records: [concurrentRecord],
+      }))],
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: { ...DEFAULT_SETTINGS, outputFormat: 'json' },
+  }, { vault });
+
+  expect(summary.failed).toEqual([]);
+  expect(parseJsonDocument(vault.readText(target)).document.records)
+    .toEqual([sourceRecord, concurrentRecord]);
+});
+
+it('retries and merges a managed destination modified at the conditional write', async () => {
+  const sourceRecord = historyRecord();
+  const targetRecord = historyRecord({
+    timestamp: '2026-08-03T15:35:56+03:00',
+    sync: {
+      namespace: 'obsidian-browser-sync',
+      browser: 'chrome',
+      id: '222222222222222222222222',
+    },
+  });
+  const concurrentRecord = historyRecord({
+    timestamp: '2026-08-03T15:36:56+03:00',
+    sync: {
+      namespace: 'obsidian-browser-sync',
+      browser: 'chrome',
+      id: '333333333333333333333333',
+    },
+  });
+  const source = 'Browser History/source.md';
+  const target = 'Browser History/2026/2026-08.json';
+  const initialTarget = historyDocument({ records: [targetRecord] });
+  const concurrentTarget = historyDocument({
+    records: [targetRecord, concurrentRecord],
+  });
+  const vault = fakeVault({
+    files: {
+      [source]: serializeMarkdownDocument(historyDocument({
+        metadata: {
+          ...historyDocument().metadata,
+          source_format: 'obsidian_browser_sync_markdown',
+        },
+        records: [sourceRecord],
+      })),
+      [target]: serializeJsonDocument(initialTarget),
+    },
+    conditionalWriteInterference: {
+      path: target,
+      contents: [serializeJsonDocument(concurrentTarget)],
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: { ...DEFAULT_SETTINGS, outputFormat: 'json' },
+  }, { vault });
+
+  expect(summary.failed).toEqual([]);
+  expect(parseJsonDocument(vault.readText(target)).document.records)
+    .toEqual([sourceRecord, targetRecord, concurrentRecord]);
+});
+
+it('does not overwrite an unmanaged destination created at the conditional write', async () => {
+  const source = 'Browser History/2026/2026-08.md';
+  const target = 'Browser History/2026/2026-08.json';
+  const vault = fakeVaultWithRenderedVisit(visit(), {
+    conditionalWriteInterference: {
+      path: target,
+      contents: ['Private destination'],
+    },
+  });
+
+  const summary = await convertExistingExports({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    },
+  }, { vault });
+
+  expect(summary.failed).toEqual([
+    { path: target, category: 'unmanaged-destination' },
+  ]);
+  expect(vault.readText(target)).toBe('Private destination');
+  expect(vault.hasFile(source)).toBe(true);
+  expect(vault.trashedPaths()).toEqual([]);
+});
+
+it('retains affected sources and continues after bounded destination churn', async () => {
+  const source = 'Browser History/2026/2026-08.md';
+  const independentSource = 'Browser History/2026/2026-09.md';
+  const target = 'Browser History/2026/2026-08.json';
+  const churn = [
+    '444444444444444444444444',
+    '555555555555555555555555',
+    '666666666666666666666666',
+  ].map((id, index) => serializeJsonDocument(historyDocument({
+    records: [historyRecord({
+      timestamp: `2026-08-03T15:3${index + 5}:56+03:00`,
+      sync: { namespace: 'obsidian-browser-sync', browser: 'chrome', id },
+    })],
+  })));
+  const vault = fakeVault({
+    files: {
+      [source]: newNote('2026-08', [renderVisit(visit()).trimEnd()]),
+      [independentSource]: newNote('2026-09', [renderVisit(visit({
+        visitedAt: new Date('2026-09-03T12:34:56Z'),
+      })).trimEnd()]),
+    },
+    conditionalWriteInterference: { path: target, contents: churn },
+  });
+
+  const summary = await convertExistingExports({
+    settings: {
+      ...DEFAULT_SETTINGS,
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    },
+  }, { vault });
+
+  expect(summary.failed).toEqual([{ path: target, category: 'concurrency' }]);
+  expect(vault.hasFile(source)).toBe(true);
+  expect(vault.hasFile('Browser History/2026/2026-09.json')).toBe(true);
+  expect(vault.trashedPaths()).toEqual([independentSource]);
+});
+
 it('rejects an import racing conversion and releases the guard afterward', async () => {
   const vault = fakeVault();
   const scan = vault.scanFiles.bind(vault);
