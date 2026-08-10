@@ -328,6 +328,8 @@ import BrowserSyncPlugin, {
 import { BrowserSyncSettingTab } from '../src/settings-tab';
 import { DEFAULT_SETTINGS, hashDeviceIdentityToken } from '../src/settings';
 import { runImport } from '../src/sync/importer';
+import type { ConversionSummary } from '../src/sync/converter';
+import { BrowserSyncOperationAlreadyRunningError } from '../src/sync/operation-guard';
 import { fakeVault, fakeVaultWithRenderedVisit } from './helpers/fake-vault';
 import { visit } from './helpers/visits';
 
@@ -336,6 +338,13 @@ const emptySummary: ImportSummary = {
   alreadyPresent: 0,
   skippedProfiles: 0,
   failedProfiles: [],
+};
+const emptyConversionSummary: ConversionSummary = {
+  converted: 0,
+  alreadyCurrent: 0,
+  retained: 0,
+  skippedReplacement: 0,
+  failed: [],
 };
 const TOKEN_A = 'a'.repeat(64);
 const TOKEN_B = 'b'.repeat(64);
@@ -371,6 +380,7 @@ function runtime(
     discover: vi.fn(async () => []),
     readVisits: vi.fn(async () => []),
     runImporter: vi.fn(async () => emptySummary),
+    runConverter: vi.fn(async () => emptyConversionSummary),
     notice: vi.fn(),
     ...overrides,
   };
@@ -452,7 +462,7 @@ describe('BrowserSyncPlugin', () => {
     obsidianMock.suggests.length = 0;
   });
 
-  it('registers manual import and rebuild commands without importing on startup', async () => {
+  it('registers manual import, rebuild, and conversion commands without importing on startup', async () => {
     const fakeRuntime = runtime();
     const plugin = new PluginHarness(undefined, fakeRuntime);
 
@@ -462,10 +472,13 @@ describe('BrowserSyncPlugin', () => {
       .toEqual([
         'import-browser-history',
         'rebuild-browser-history-output',
+        'convert-browser-history-exports',
       ]);
     expect(plugin.commands[0].name).toBe('Import browser history');
     expect(plugin.commands[1].name).toBe('Rebuild browser history output');
+    expect(plugin.commands[2].name).toBe('Convert existing browser history exports');
     expect(fakeRuntime.runImporter).not.toHaveBeenCalled();
+    expect(fakeRuntime.runConverter).not.toHaveBeenCalled();
     expect(fakeRuntime.discover).not.toHaveBeenCalled();
     expect(plugin.settingTabs).toHaveLength(1);
     expect(plugin.settingTabs[0]).toBeInstanceOf(BrowserSyncSettingTab);
@@ -479,6 +492,14 @@ describe('BrowserSyncPlugin', () => {
     expect(fakeRuntime.runImporter).toHaveBeenLastCalledWith(
       expect.objectContaining({ rebuild: true }),
       expect.any(Object),
+    );
+
+    const originalSettingsSnapshot = structuredClone(plugin.data.settings);
+    await plugin.commands[2].callback?.();
+
+    expect(fakeRuntime.runConverter).toHaveBeenCalledWith(
+      { settings: originalSettingsSnapshot },
+      { vault: fakeRuntime.vault },
     );
   });
 
@@ -539,6 +560,109 @@ describe('BrowserSyncPlugin', () => {
       expect.objectContaining({ settings: original }),
       expect.any(Object),
     );
+  });
+
+  it('captures conversion settings before deferred folder preparation', async () => {
+    const folderReady = deferred();
+    const vault = fakeVault();
+    vault.ensureFolder = vi.fn(async () => {
+      await folderReady.promise;
+    });
+    const runConverter = vi.fn(async () => emptyConversionSummary);
+    const plugin = new PluginHarness(undefined, runtime({ vault, runConverter }));
+    await plugin.onload();
+    const original = structuredClone(plugin.data.settings);
+
+    const converting = plugin.convertBrowserHistoryExports();
+    await vi.waitFor(() => expect(vault.ensureFolder).toHaveBeenCalledWith(
+      original.outputFolder,
+    ));
+    plugin.data.settings.enabledBrowsers.chrome = false;
+    plugin.data.settings.outputFolder = 'Changed History';
+    plugin.data.settings.outputFormat = 'json';
+    plugin.data.settings.formatConversionBehavior = 'replace';
+    folderReady.resolve();
+    await converting;
+
+    expect(runConverter).toHaveBeenCalledWith(
+      { settings: original },
+      { vault },
+    );
+  });
+
+  it('reports a conversion completion without changing cursor state', async () => {
+    const notice = vi.fn();
+    const plugin = new PluginHarness({
+      ...clonedDefaults(),
+      cursors: {
+        'chrome:default': {
+          visitedAtMs: Date.parse('2026-08-03T12:00:00Z'),
+          sourceVisitId: '42',
+        },
+      },
+    }, runtime({
+      notice,
+      runConverter: vi.fn(async () => ({
+        converted: 2,
+        alreadyCurrent: 1,
+        retained: 2,
+        skippedReplacement: 1,
+        failed: [],
+      })),
+    }));
+    await plugin.onload();
+    const cursors = structuredClone(plugin.data.cursors);
+
+    await plugin.convertBrowserHistoryExports();
+
+    expect(notice).toHaveBeenCalledWith(
+      'Browser history conversion complete: 2 converted, 1 already current, 2 originals retained, 1 replacement skipped, 0 failed.',
+    );
+    expect(plugin.data.cursors).toEqual(cursors);
+    expect(plugin.saved).toHaveLength(0);
+  });
+
+  it('reports partial conversion failures without exposing history content', async () => {
+    const secret = 'https://private.example/visited';
+    const notice = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const plugin = new PluginHarness(undefined, runtime({
+      notice,
+      runConverter: vi.fn(async () => ({
+        converted: 1,
+        alreadyCurrent: 2,
+        retained: 3,
+        skippedReplacement: 4,
+        failed: [{ path: `Browser History/${secret}.json`, category: 'write' }],
+      })),
+    }));
+    await plugin.onload();
+
+    await plugin.convertBrowserHistoryExports();
+
+    expect(notice).toHaveBeenCalledWith(
+      'Browser history conversion complete: 1 converted, 2 already current, 3 originals retained, 4 replacement skipped, 1 failed.',
+    );
+    expect(notice).toHaveBeenCalledWith(
+      'Some browser history exports could not be converted. Check the output folder and console for details.',
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(secret);
+    consoleError.mockRestore();
+  });
+
+  it('reports when another Browser Sync operation is already running', async () => {
+    const notice = vi.fn();
+    const plugin = new PluginHarness(undefined, runtime({
+      notice,
+      runConverter: vi.fn(async () => {
+        throw new BrowserSyncOperationAlreadyRunningError();
+      }),
+    }));
+    await plugin.onload();
+
+    await plugin.convertBrowserHistoryExports();
+
+    expect(notice).toHaveBeenCalledWith('A Browser Sync operation is already running.');
   });
 
   it('migrates loaded data and persists settings through one validated method', async () => {

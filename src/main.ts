@@ -44,6 +44,12 @@ import {
   type ImportDependencies,
   type ImportRequest,
 } from './sync/importer';
+import {
+  convertExistingExports,
+  type ConversionDependencies,
+  type ConversionRequest,
+  type ConversionSummary,
+} from './sync/converter';
 import { BrowserSyncOperationAlreadyRunningError } from './sync/operation-guard';
 
 export interface BrowserSyncRuntime {
@@ -56,6 +62,10 @@ export interface BrowserSyncRuntime {
     request: ImportRequest,
     dependencies: ImportDependencies,
   ): Promise<ImportSummary>;
+  runConverter(
+    request: ConversionRequest,
+    dependencies: ConversionDependencies,
+  ): Promise<ConversionSummary>;
   permissionDenied?(profile: BrowserProfile): boolean;
   notice(message: string): void;
 }
@@ -103,6 +113,11 @@ export default class BrowserSyncPlugin extends Plugin {
       id: 'rebuild-browser-history-output',
       name: 'Rebuild browser history output',
       callback: () => this.importBrowserHistory(true),
+    });
+    this.addCommand({
+      id: 'convert-browser-history-exports',
+      name: 'Convert existing browser history exports',
+      callback: () => this.convertBrowserHistoryExports(),
     });
   }
 
@@ -214,6 +229,43 @@ export default class BrowserSyncPlugin extends Plugin {
     }
   }
 
+  async convertBrowserHistoryExports(): Promise<void> {
+    const runtime = this.requireRuntime();
+    const settings = cloneSettings(this.data.settings);
+    if (!validSettings(settings, this.app.vault.configDir)) {
+      runtime.notice(
+        'Browser history conversion could not start. Choose a valid vault-relative output folder in Browser Sync settings.',
+      );
+      return;
+    }
+
+    try {
+      await runtime.vault.ensureFolder(settings.outputFolder);
+      const summary = await runtime.runConverter(
+        { settings },
+        { vault: runtime.vault },
+      );
+      runtime.notice(conversionCompletionNotice(summary));
+      if (summary.failed.length > 0) {
+        logConversionFailures(summary);
+        runtime.notice(
+          'Some browser history exports could not be converted. Check the output folder and console for details.',
+        );
+      }
+    } catch (error) {
+      if (error instanceof BrowserSyncOperationAlreadyRunningError) {
+        runtime.notice('A Browser Sync operation is already running.');
+        return;
+      }
+      console.error('[Browser Sync] Conversion failed', {
+        category: failureCategory(error),
+      });
+      runtime.notice(
+        'Browser history conversion failed. Check the output folder and console, then try again.',
+      );
+    }
+  }
+
   protected createRuntime(): BrowserSyncRuntime {
     const platform = currentPlatform();
     const homeDir = homedir();
@@ -236,6 +288,7 @@ export default class BrowserSyncPlugin extends Plugin {
         sqlite,
       ),
       runImporter: runImport,
+      runConverter: convertExistingExports,
       permissionDenied: (profile) => permissionDeniedPaths.has(profile.databasePath),
       notice: (message) => {
         new Notice(message);
@@ -450,6 +503,37 @@ function completionNotice(summary: ImportSummary): string {
     `${summary.skippedProfiles} skipped,`,
     `${summary.failedProfiles.length} failed.`,
   ].join(' ');
+}
+
+function conversionCompletionNotice(summary: ConversionSummary): string {
+  return [
+    'Browser history conversion complete:',
+    `${summary.converted} converted,`,
+    `${summary.alreadyCurrent} already current,`,
+    `${summary.retained} originals retained,`,
+    `${summary.skippedReplacement} replacement skipped,`,
+    `${summary.failed.length} failed.`,
+  ].join(' ');
+}
+
+function logConversionFailures(summary: ConversionSummary): void {
+  const safeCategories = new Set([
+    'concurrency',
+    'conflict',
+    'invalid-destination',
+    'invalid-source',
+    'read-back',
+    'read-destination',
+    'read-source',
+    'source-changed',
+    'trash',
+    'unmanaged-destination',
+    'validation',
+    'write',
+  ]);
+  const categories = [...new Set(summary.failed.map(({ category }) =>
+    safeCategories.has(category) ? category : 'unexpected'))].sort();
+  console.error('[Browser Sync] Conversion completed with failures', { categories });
 }
 
 function hasSafariPermissionDenial(
