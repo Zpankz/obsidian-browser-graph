@@ -62,6 +62,88 @@ it('round-trips modern marked and exact legacy unmarked entries', () => {
   expect(renderHistoryRecord(legacy)).not.toContain('<!-- obsidian-browser-sync:');
 });
 
+it('round-trips a blank modern title with exact metadata after the sync marker', () => {
+  const record = historyRecord({ title: '' });
+  const document = historyDocument({
+    metadata: {
+      ...historyDocument().metadata,
+      source_format: 'obsidian_browser_sync_markdown',
+    },
+    records: [record],
+  });
+
+  const markdown = serializeMarkdownDocument(document);
+  expect(markdown).toContain(
+    `  <!-- obsidian-browser-sync:${record.sync?.browser}:${record.sync?.id} -->\n` +
+      '  <!-- obsidian-browser-sync:title-empty -->\n',
+  );
+  expect(parseMarkdownDocument(markdown).document).toEqual(document);
+});
+
+it('round-trips a blank legacy title with exact metadata after the visit line', () => {
+  const record = historyRecord({ title: '', sync: undefined });
+  const document = historyDocument({
+    metadata: {
+      ...historyDocument().metadata,
+      source_format: 'obsidian_browser_sync_markdown',
+    },
+    records: [record],
+  });
+
+  const markdown = serializeMarkdownDocument(document);
+  expect(renderHistoryRecord(record)).toMatch(
+    /\n {2}<!-- obsidian-browser-sync:title-empty -->\n$/,
+  );
+  expect(parseMarkdownDocument(markdown).document).toEqual(document);
+});
+
+it('preserves original title spelling when blank-title metadata requires it', () => {
+  const record = historyRecord({
+    title: '',
+    original_title: 'Archived [source] title',
+    sync: undefined,
+  });
+  const document = historyDocument({
+    metadata: {
+      ...historyDocument().metadata,
+      source_format: 'obsidian_browser_sync_markdown',
+    },
+    records: [record],
+  });
+
+  expect(parseMarkdownDocument(serializeMarkdownDocument(document)).document).toEqual(document);
+});
+
+it('keeps a genuine title equal to the URL fallback nonblank', () => {
+  const record = historyRecord({ title: 'https://example.com/' });
+  const document = historyDocument({
+    metadata: {
+      ...historyDocument().metadata,
+      source_format: 'obsidian_browser_sync_markdown',
+    },
+    records: [record],
+  });
+
+  const markdown = serializeMarkdownDocument(document);
+  expect(markdown).not.toContain('obsidian-browser-sync:title-empty');
+  expect(parseMarkdownDocument(markdown).document).toEqual(document);
+});
+
+it.each([
+  '\n\n  <!-- obsidian-browser-sync:title-empty -->',
+  '\n```html\n  <!-- obsidian-browser-sync:title-empty -->\n```',
+])('does not apply fenced or non-adjacent blank-title metadata %j', (suffix) => {
+  const record = historyRecord({
+    title: 'https://example.com/',
+    sync: undefined,
+  });
+  const content = newNote('2026-08', [`${renderHistoryRecord(record).trimEnd()}${suffix}`]);
+  const parsed = parseMarkdownDocument(content);
+
+  expect(parsed.document.records[0].title).toBe('https://example.com/');
+  expect(parsed.hasUnrecognizedContent).toBe(true);
+});
+
 it('reverses only generated escapes for inert records', () => {
   const input = visit({
     title: '<unsafe> [label]',
@@ -291,7 +373,8 @@ it('extracts only valid sync markers', () => {
   expect(
     extractImportedIds(
       '<!-- obsidian-browser-sync:chrome:1234567890abcdef12345678 -->\n' +
-        '<!-- obsidian-browser-sync:chrome:NOT-VALID -->',
+        '<!-- obsidian-browser-sync:chrome:NOT-VALID -->\n' +
+        '  <!-- obsidian-browser-sync:title-empty -->',
     ),
   ).toEqual(new Set(['1234567890abcdef12345678']));
 });

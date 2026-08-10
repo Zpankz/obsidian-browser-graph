@@ -13,6 +13,7 @@ import {
 
 const MARKER_LINE = /^ {0,3}<!-- obsidian-browser-sync:([a-z0-9-]+):([a-f0-9]{24}) -->[ ]*$/;
 const GENERATED_MARKER_LINE = /^ {2}<!-- obsidian-browser-sync:(safari|firefox|chrome|edge|brave|chromium|vivaldi):([a-f0-9]{24}) -->$/;
+const TITLE_EMPTY_MARKER_LINE = '  <!-- obsidian-browser-sync:title-empty -->';
 const VISIT_LINE = /^- (\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d[+-](?:[01]\d|2[0-3]):[0-5]\d) (.+)$/;
 const MANAGED_ENVELOPE_LINES = [
   '---',
@@ -135,6 +136,14 @@ export function renderVisit(visit: NormalizedVisit): string {
 
 export function renderHistoryRecord(input: BrowserHistoryRecord): string {
   const record = validateBrowserHistoryRecord(input);
+  const syncMarker = record.sync
+    ? `  <!-- obsidian-browser-sync:${record.sync.browser}:${record.sync.id} -->\n`
+    : '';
+  const titleMarker = record.title === '' ? `${TITLE_EMPTY_MARKER_LINE}\n` : '';
+  return `${renderedVisitLine(record)}\n${syncMarker}${titleMarker}`;
+}
+
+function renderedVisitLine(record: BrowserHistoryRecord): string {
   const url: SafeUrl = record.representation === 'markdown_link'
     ? safeUrl(record.url)
     : { clickable: false, display: inertCodeSpan(record.url) };
@@ -148,10 +157,7 @@ export function renderHistoryRecord(input: BrowserHistoryRecord): string {
       : `${title} — ${url.display}`;
   const browserName = safeLabel(record.browser);
   const profileName = safeLabel(record.profile);
-  const marker = record.sync
-    ? `  <!-- obsidian-browser-sync:${record.sync.browser}:${record.sync.id} -->\n`
-    : '';
-  return `- ${record.timestamp} ${visibleVisit} — ${browserName} / ${profileName}\n${marker}`;
+  return `- ${record.timestamp} ${visibleVisit} — ${browserName} / ${profileName}`;
 }
 
 export function extractImportedIds(markdown: string): Set<string> {
@@ -228,16 +234,23 @@ export function parseMarkdownDocument(content: string): ManagedDocumentParse {
       continue;
     }
     consumed.add(index);
-    const marker = GENERATED_MARKER_LINE.exec(envelope.bodyLines[index + 1] ?? '');
+    let metadataIndex = index + 1;
+    const marker = GENERATED_MARKER_LINE.exec(envelope.bodyLines[metadataIndex] ?? '');
     if (marker) {
       record.sync = {
         namespace: 'obsidian-browser-sync',
         browser: marker[1] as BrowserId,
         id: marker[2],
       };
-      consumed.add(index + 1);
-      index += 1;
+      consumed.add(metadataIndex);
+      metadataIndex += 1;
     }
+    if (envelope.bodyLines[metadataIndex] === TITLE_EMPTY_MARKER_LINE) {
+      preserveBlankTitleRepresentation(record, line);
+      consumed.add(metadataIndex);
+      metadataIndex += 1;
+    }
+    index = metadataIndex - 1;
     records.push(validateBrowserHistoryRecord(record));
   }
 
@@ -313,9 +326,17 @@ function recordFromGeneratedLine(line: string): BrowserHistoryRecord | undefined
 
 function isExactRenderedLine(record: BrowserHistoryRecord, line: string): boolean {
   try {
-    return renderHistoryRecord(record).trimEnd() === line;
+    return renderedVisitLine(validateBrowserHistoryRecord(record)) === line;
   } catch {
     return false;
+  }
+}
+
+function preserveBlankTitleRepresentation(record: BrowserHistoryRecord, line: string): void {
+  const renderedTitle = record.title;
+  record.title = '';
+  if (renderedVisitLine(record) !== line) {
+    record.original_title = renderedTitle;
   }
 }
 
@@ -361,7 +382,7 @@ function parseGeneratedLink(value: string): VisibleVisit | undefined {
     const renderedUrl = safeUrl(url);
     if (renderedUrl.clickable && `[${renderedTitle}](${renderedUrl.destination})` === value) {
       return {
-        title: renderedTitle === renderedUrl.display ? '' : title,
+        title,
         url,
         representation: 'markdown_link',
       };
