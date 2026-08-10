@@ -1168,10 +1168,14 @@ describe('BrowserSyncSettingTab', () => {
       value: 'markdown',
       options: { markdown: 'Markdown', csv: 'CSV', json: 'JSON' },
     });
+    expect(setting('Export format').description)
+      .toBe('Choose the file format for future browser history imports.');
     expect(setting('Format conversion behavior').dropdown).toMatchObject({
       value: 'keep',
       options: { keep: 'Keep original files', replace: 'Replace original files' },
     });
+    expect(setting('Format conversion behavior').description)
+      .toBe('Choose whether the conversion command keeps or replaces original files.');
     expect(setting('Layout').dropdown?.options).toEqual({
       flat: 'Flat',
       tiered: 'Tiered',

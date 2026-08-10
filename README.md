@@ -1,6 +1,6 @@
 # Obsidian Browser Sync
 
-Obsidian Browser Sync is a desktop-only Obsidian plugin that imports local browser visits into ordinary Markdown notes. It preserves every visit, including repeated visits to the same URL, and imports every detected profile for each enabled browser.
+Obsidian Browser Sync is a desktop-only Obsidian plugin that imports local browser visits into Markdown, CSV, or JSON files. It preserves every visit, including repeated visits to the same URL, and imports every detected profile for each enabled browser.
 
 Imports run only when you choose **Import browser history** from Obsidian's command palette. The plugin has no startup import, timer, background watcher, ribbon action, or mobile support.
 
@@ -49,7 +49,7 @@ npm run test:release
 
 ## Use
 
-1. Open **Settings → Browser Sync** and review the browser sources, output folder, layout, and note period.
+1. Open **Settings → Browser Sync** and review the browser sources, output folder, export format, layout, and note period.
 2. Open the command palette and run **Import browser history**.
 3. Run the same command whenever you want to import newer visits.
 4. If generated notes were partially deleted or you want to backfill a different existing output folder, run **Rebuild browser history output**.
@@ -62,7 +62,9 @@ The settings page provides:
 
 - A toggle for Safari, Firefox, Google Chrome, Microsoft Edge, Brave, Chromium, and Vivaldi. Sources default to enabled; unavailable or undetected sources are skipped.
 - A vault-relative output folder with suggestions from existing vault folders. The default is `Browser History`. Absolute and drive-relative paths, parent traversal, `.obsidian` aliases, Windows reserved names/characters, and components with trailing dots or spaces are rejected on every platform.
-- A file name template containing `{period}`. The default is `{period}`; for example, `Browser history - {period}` produces `Browser history - 2026-08.md` for a monthly note. The `.md` extension is added automatically, and folders or unknown placeholders are rejected.
+- A file name template containing `{period}`. The default is `{period}`; for example, `Browser history - {period}` produces `Browser history - 2026-08.md`, `.csv`, or `.json` for a monthly export. The selected format's extension is added automatically, and folders or unknown placeholders are rejected.
+- An **Export format** dropdown with **Markdown**, **CSV**, and **JSON**. The default is **Markdown**. Changing it affects future imports; it does not rename or rewrite existing exports.
+- A **Format conversion behavior** dropdown with **Keep original files** and **Replace original files**. The default is **Keep original files**, and the choice applies only when the conversion command runs.
 - A **Flat** or **Tiered** layout. The default is **Tiered**.
 - A **Day**, **ISO week**, **Month**, or **Year** note period. The default is **Month**.
 - A read-only list of detected profiles and their availability or permission status.
@@ -73,7 +75,14 @@ With the defaults, an August 2026 visit is written to:
 Browser History/2026/2026-08.md
 ```
 
-Flat layouts place notes directly in the output folder:
+For a monthly period, each format uses the same period path and its own extension:
+
+| Layout | Markdown | CSV | JSON |
+| --- | --- | --- | --- |
+| Flat | `History/2026-08.md` | `History/2026-08.csv` | `History/2026-08.json` |
+| Tiered | `History/2026/2026-08.md` | `History/2026/2026-08.csv` | `History/2026/2026-08.json` |
+
+Flat layouts place exports directly in the output folder. These Markdown examples show each period:
 
 ```text
 History/2026-08-03.md
@@ -82,7 +91,7 @@ History/2026-08.md
 History/2026.md
 ```
 
-Tiered layouts create time folders down to the selected period:
+Tiered layouts create time folders down to the selected period. The same paths end in `.csv` or `.json` when that export format is selected:
 
 ```text
 History/2026.md
@@ -98,15 +107,35 @@ History/2025/2025-12/2026-W01.md
 History/2025/2025-12/2026-W01/2026-01-01.md
 ```
 
-Dates, times, and filenames use the local timezone of the Obsidian desktop environment at import time. Every visit entry begins with a full local ISO timestamp such as `2026-08-03T09:14:32+03:00`, including the applicable UTC offset. Existing notes keep user-authored content; the plugin appends entries and never reformats or deletes that content.
+Dates, times, and filenames use the local timezone of the Obsidian desktop environment at import time. Every visit has a full local ISO timestamp such as `2026-08-03T09:14:32+03:00`, including the applicable UTC offset. Existing Markdown notes keep user-authored content; the plugin appends entries and never reformats or deletes that content.
+
+## Export formats
+
+All formats represent the same canonical visit records. Modern records include `sync` metadata (`namespace`, browser ID, and deterministic visit ID), while the field remains optional so legacy records without it stay supported. Markdown is human-readable and uses hidden comments for sync metadata. Only HTTP(S) URLs are rendered as links; non-web schemes and malformed URLs remain inert text.
+
+JSON exports use `schema_version: 1`, `type: "browser_history"`, document metadata, and a `records` array. CSV exports use RFC 4180 quoting and this fixed header:
+
+```text
+schema_version,type,metadata_browser_sync,metadata_period,metadata_heading,metadata_source_format,timestamp,title,url,browser,profile,representation,original_title,sync_namespace,sync_browser,sync_id
+```
+
+CSV cells beginning with `=`, `+`, `-`, `@`, a tab, or a line break are encoded so spreadsheet applications do not interpret imported history text as formulas. The encoding is reversible when Browser Sync reads the CSV again.
+
+## Converting existing exports
+
+After selecting the desired **Export format**, run **Convert existing browser history exports** from the command palette. The command scans managed `.md`, `.csv`, and `.json` files in the configured output folder, reconciles records by period, and writes the selected format using the current file name template and layout. It ignores unmanaged files and does not alter browser cursor state.
+
+With **Keep original files** (the default), successful conversion leaves source files in place. With **Replace original files**, a source is moved to Obsidian's recoverable system trash only after the destination has been written, parsed, and read back successfully. A source is retained after any failure or concurrent change. Markdown containing user-authored or otherwise unrecognized content is also retained, even when replacement is selected, so conversion never discards that content. Existing unmanaged destination files are not overwritten.
+
+Changing **Export format** preserves the profile cursors already stored in `data.json`, so the next normal import writes only visits newer than those cursors to the newly selected format. Run the conversion command if historical output should also exist in the new format.
 
 ## Idempotency and state
 
-Each imported entry is followed by a hidden `obsidian-browser-sync` marker containing a deterministic, path-independent visit ID. The marker namespace is retained for compatibility even though the Community plugin ID is `browser-history-sync`. The plugin indexes managed markers across all Markdown files in the vault, so these markers remain the final deduplication authority after a change to the output folder, layout, period, timezone, or local browser-profile path. Running the command twice without new history adds nothing, and existing notes or user-authored content are never moved or rewritten.
+Each modern imported record has an `obsidian-browser-sync` namespace and a deterministic, path-independent visit ID. Markdown stores it in a hidden marker, while CSV and JSON store it in explicit sync fields. The namespace is retained for compatibility even though the Community plugin ID is `browser-history-sync`. The plugin indexes sync IDs vault-wide across Markdown, CSV, and JSON before importing, so those IDs remain the final deduplication authority after a change to the output format, folder, layout, period, timezone, or local browser-profile path. Running the command twice without new history adds nothing. Normal imports do not move or rewrite existing Markdown notes or user-authored content.
 
 The plugin also saves a timestamp and source-visit-ID high-water cursor for each local browser profile in version 3 of its `data.json`. Cursor state is device-specific and should not be treated as portable vault content. A random per-device token is stored outside the synced vault in Obsidian/Electron local storage; only its SHA-256 hash is written to `data.json`.
 
-If state is deleted or omitted from Git, the local device token is cleared, or the saved hash does not match, the next import invalidates cursors and rescans from the beginning. Copying `data.json` to another device is rejected even when both devices report identical platform, hostname, home-directory, and browser paths. Existing hidden markers remain device-independent and prevent duplicate entries. Keep the markers in generated notes if you edit them.
+If state is deleted or omitted from Git, the local device token is cleared, or the saved hash does not match, the next import invalidates cursors and rescans from the beginning. Copying `data.json` to another device is rejected even when both devices report identical platform, hostname, home-directory, and browser paths. Existing sync IDs remain device-independent and prevent duplicate modern records. Legacy records without sync IDs cannot be indexed, so they can be imported again after device-state invalidation if the browser still retains those visits. Keep hidden sync markers in generated Markdown if you edit it.
 
 Each import uses an immutable snapshot of the settings that were active when the command was invoked. Settings changed while an import is running apply only to the next run.
 
@@ -125,13 +154,13 @@ The plugin reads a temporary snapshot rather than opening the live browser datab
 
 ## Privacy
 
-All processing stays on the local machine. The plugin makes no network requests, opens browser databases read-only, never writes to or deletes browser data, and removes temporary database snapshots after each profile attempt. A cleanup failure is reported explicitly because a sensitive temporary snapshot may remain. The plugin writes generated Markdown under the configured vault folder, settings and a device-identity hash in its `data.json`, and the raw random device token only in local application storage outside the vault.
+All processing and format conversion stay on the local machine. The plugin makes no network requests, opens browser databases read-only, never writes to or deletes browser data, and removes temporary database snapshots after each profile attempt. A cleanup failure is reported explicitly because a sensitive temporary snapshot may remain. The plugin writes generated exports under the configured vault folder, settings and a device-identity hash in its `data.json`, and the raw random device token only in local application storage outside the vault.
 
-Browser titles, URLs, browser names, and profile labels are treated as untrusted text and escaped before insertion into Markdown. Only `http:` and `https:` destinations become links; other schemes and malformed URLs remain inert text. Corrupt, negative, unrepresentable, or implausibly future timestamps are skipped at the profile-reader boundary. Visits not persisted by a browser, such as most private or incognito activity, are unavailable to the plugin.
+Browser titles, URLs, browser names, and profile labels are treated as untrusted text. Markdown escapes them before rendering, and CSV applies reversible spreadsheet-safety encoding. Only `http:` and `https:` destinations become Markdown links; other schemes and malformed URLs remain inert text. Corrupt, negative, unrepresentable, or implausibly future timestamps are skipped at the profile-reader boundary. Visits not persisted by a browser, such as most private or incognito activity, are unavailable to the plugin.
 
 ## Git-controlled vaults
 
-The release has no separate WASM sidecar: the production `sql.js` WebAssembly bytes are embedded in `.obsidian/plugins/browser-history-sync/main.js`. For a Git-controlled vault, either ignore the installed plugin directory or intentionally version the three Community release files. Generated browser history is ordinary Markdown and can be reviewed, diffed, and versioned normally. Consider excluding the plugin's device-specific `data.json` while retaining the hidden markers in history notes.
+The release has no separate WASM sidecar: the production `sql.js` WebAssembly bytes are embedded in `.obsidian/plugins/browser-history-sync/main.js`. For a Git-controlled vault, either ignore the installed plugin directory or intentionally version the three Community release files. Generated browser history uses ordinary Markdown, CSV, or JSON and can be reviewed, diffed, and versioned normally. Consider excluding the plugin's device-specific `data.json` while retaining sync metadata in history exports.
 
 ## Development verification
 
