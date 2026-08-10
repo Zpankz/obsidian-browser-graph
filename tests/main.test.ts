@@ -463,7 +463,9 @@ describe('BrowserSyncPlugin', () => {
   });
 
   it('registers manual import, rebuild, and conversion commands without importing on startup', async () => {
-    const fakeRuntime = runtime();
+    const fakeRuntime = runtime({
+      vault: fakeVault({ files: { 'Browser History/.keep': '' } }),
+    });
     const plugin = new PluginHarness(undefined, fakeRuntime);
 
     await plugin.onload();
@@ -562,11 +564,13 @@ describe('BrowserSyncPlugin', () => {
     );
   });
 
-  it('captures conversion settings before deferred folder preparation', async () => {
-    const folderReady = deferred();
+  it('captures conversion settings before deferred folder existence checks', async () => {
+    const existsReady = deferred();
     const vault = fakeVault();
-    vault.ensureFolder = vi.fn(async () => {
-      await folderReady.promise;
+    vault.ensureFolder = vi.fn(async () => {});
+    vault.exists = vi.fn(async () => {
+      await existsReady.promise;
+      return true;
     });
     const runConverter = vi.fn(async () => emptyConversionSummary);
     const plugin = new PluginHarness(undefined, runtime({ vault, runConverter }));
@@ -574,24 +578,47 @@ describe('BrowserSyncPlugin', () => {
     const original = structuredClone(plugin.data.settings);
 
     const converting = plugin.convertBrowserHistoryExports();
-    await vi.waitFor(() => expect(vault.ensureFolder).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(vault.exists).toHaveBeenCalledWith(
       original.outputFolder,
     ));
     plugin.data.settings.enabledBrowsers.chrome = false;
     plugin.data.settings.outputFolder = 'Changed History';
     plugin.data.settings.outputFormat = 'json';
     plugin.data.settings.formatConversionBehavior = 'replace';
-    folderReady.resolve();
+    existsReady.resolve();
     await converting;
 
     expect(runConverter).toHaveBeenCalledWith(
       { settings: original },
       { vault },
     );
+    expect(vault.ensureFolder).not.toHaveBeenCalled();
+  });
+
+  it('does not convert or create a missing configured output folder', async () => {
+    const notice = vi.fn();
+    const vault = fakeVault();
+    vault.ensureFolder = vi.fn(async () => {});
+    const runConverter = vi.fn(async () => emptyConversionSummary);
+    const plugin = new PluginHarness(undefined, runtime({
+      vault,
+      notice,
+      runConverter,
+    }));
+    await plugin.onload();
+
+    await plugin.convertBrowserHistoryExports();
+
+    expect(vault.ensureFolder).not.toHaveBeenCalled();
+    expect(runConverter).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith(
+      'Browser history conversion could not start. The configured output folder does not exist.',
+    );
   });
 
   it('reports a conversion completion without changing cursor state', async () => {
     const notice = vi.fn();
+    const vault = fakeVault({ files: { 'Browser History/.keep': '' } });
     const plugin = new PluginHarness({
       ...clonedDefaults(),
       cursors: {
@@ -601,6 +628,7 @@ describe('BrowserSyncPlugin', () => {
         },
       },
     }, runtime({
+      vault,
       notice,
       runConverter: vi.fn(async () => ({
         converted: 2,
@@ -625,8 +653,10 @@ describe('BrowserSyncPlugin', () => {
   it('reports partial conversion failures without exposing history content', async () => {
     const secret = 'https://private.example/visited';
     const notice = vi.fn();
+    const vault = fakeVault({ files: { 'Browser History/.keep': '' } });
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const plugin = new PluginHarness(undefined, runtime({
+      vault,
       notice,
       runConverter: vi.fn(async () => ({
         converted: 1,
@@ -652,7 +682,9 @@ describe('BrowserSyncPlugin', () => {
 
   it('reports when another Browser Sync operation is already running', async () => {
     const notice = vi.fn();
+    const vault = fakeVault({ files: { 'Browser History/.keep': '' } });
     const plugin = new PluginHarness(undefined, runtime({
+      vault,
       notice,
       runConverter: vi.fn(async () => {
         throw new BrowserSyncOperationAlreadyRunningError();

@@ -240,7 +240,12 @@ export default class BrowserSyncPlugin extends Plugin {
     }
 
     try {
-      await runtime.vault.ensureFolder(settings.outputFolder);
+      if (!await runtime.vault.exists(settings.outputFolder)) {
+        runtime.notice(
+          'Browser history conversion could not start. The configured output folder does not exist.',
+        );
+        return;
+      }
       const summary = await runtime.runConverter(
         { settings },
         { vault: runtime.vault },
