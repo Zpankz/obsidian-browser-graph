@@ -5,15 +5,20 @@ import { DEFAULT_SETTINGS } from '../../src/settings';
 
 export interface FakeVaultOptions {
   failAppend?: string;
+  failTrash?: string;
+  failWrite?: string;
   files?: Record<string, string>;
 }
 
 export interface FakeVault extends VaultPort {
   readText(path: string): string;
+  hasFile(path: string): boolean;
+  trashedPaths(): string[];
 }
 
 export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
   const files = new Map(Object.entries(options.files ?? {}));
+  const trashed: string[] = [];
 
   return {
     async exists(path) {
@@ -33,6 +38,12 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
       }
       files.set(path, content);
     },
+    async write(path, content) {
+      if (path === options.failWrite) {
+        throw new Error(`Could not write: ${path}`);
+      }
+      files.set(path, content);
+    },
     async append(path, content) {
       if (path === options.failAppend) {
         throw new Error(`Could not append: ${path}`);
@@ -43,15 +54,26 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
       }
       files.set(path, current + content);
     },
+    async trash(path) {
+      if (path === options.failTrash) {
+        throw new Error(`Could not trash: ${path}`);
+      }
+      if (!files.delete(path)) {
+        throw new Error(`Missing vault file: ${path}`);
+      }
+      trashed.push(path);
+    },
     async ensureFolder() {},
-    async scanMarkdownFiles(visit, root) {
-      const contents = [...files.entries()]
-        .filter(([path]) => path.toLowerCase().endsWith('.md')
+    async scanFiles(extensions, visit, root) {
+      const supportedExtensions = extensions.map((extension) => extension.toLowerCase());
+      const snapshots = [...files.entries()]
+        .filter(([path]) => supportedExtensions
+          .some((extension) => path.toLowerCase().endsWith(extension))
           && (root === undefined || path.startsWith(`${root}/`)))
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([, content]) => content);
-      for (const content of contents) {
-        visit(content);
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([path, content]) => ({ path, content }));
+      for (const snapshot of snapshots) {
+        await visit(snapshot);
       }
     },
     readText(path) {
@@ -60,6 +82,12 @@ export function fakeVault(options: FakeVaultOptions = {}): FakeVault {
         throw new Error(`Missing vault file: ${path}`);
       }
       return content;
+    },
+    hasFile(path) {
+      return files.has(path);
+    },
+    trashedPaths() {
+      return [...trashed];
     },
   };
 }

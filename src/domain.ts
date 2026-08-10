@@ -60,14 +60,22 @@ export interface ImportSummary {
   failedProfiles: Array<{ sourceKey: string; message: string }>;
 }
 
+export interface VaultFileSnapshot {
+  path: string;
+  content: string;
+}
+
 export interface VaultPort {
   exists(path: string): Promise<boolean>;
   read(path: string): Promise<string>;
   create(path: string, content: string): Promise<void>;
+  write(path: string, content: string): Promise<void>;
   append(path: string, content: string): Promise<void>;
+  trash(path: string): Promise<void>;
   ensureFolder(path: string): Promise<void>;
-  scanMarkdownFiles(
-    visit: (markdown: string) => void,
+  scanFiles(
+    extensions: readonly string[],
+    visit: (file: VaultFileSnapshot) => void | Promise<void>,
     root?: string,
   ): Promise<void>;
 }

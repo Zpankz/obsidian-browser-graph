@@ -30,7 +30,9 @@ interface FakeObsidianVault extends Pick<
   | 'create'
   | 'read'
   | 'append'
-  | 'getMarkdownFiles'
+  | 'modify'
+  | 'trash'
+  | 'getFiles'
 > {
   createdFolders: string[];
   createdFiles: Array<{ path: string; content: string }>;
@@ -53,11 +55,8 @@ function fakeObsidianVault(): FakeObsidianVault {
     getAbstractFileByPath(path) {
       return files.get(path) ?? null;
     },
-    getMarkdownFiles() {
-      return [...files.values()].filter(
-        (file): file is TFile => file instanceof TFile
-          && file.path.toLowerCase().endsWith('.md'),
-      );
+    getFiles() {
+      return [...files.values()].filter((file): file is TFile => file instanceof TFile);
     },
     async createFolder(path) {
       if (api.raceFolder === path) {
@@ -83,6 +82,13 @@ function fakeObsidianVault(): FakeObsidianVault {
       api.appendedFiles.push({ path: file.path, content });
       contents.set(file.path, (contents.get(file.path) ?? '') + content);
     },
+    modify: vi.fn(async (file: TFile, content: string) => {
+      contents.set(file.path, content);
+    }),
+    trash: vi.fn(async (file: TFile) => {
+      files.delete(file.path);
+      contents.delete(file.path);
+    }),
   };
   return api;
 }
@@ -123,38 +129,52 @@ describe('ObsidianVaultPort', () => {
     }]);
   });
 
-  it('scans only Markdown files without rejecting trusted unsafe legacy filenames', async () => {
-    api.files.set('History/one.md', new TFile('History/one.md'));
-    api.files.set('History/two.MD', new TFile('History/two.MD'));
-    api.files.set('History/export.txt', new TFile('History/export.txt'));
-    api.files.set('CON.md', new TFile('CON.md'));
-    api.files.set('History', new TFolder('History'));
-    api.contents.set('History/one.md', 'one');
-    api.contents.set('History/two.MD', 'two');
-    api.contents.set('History/export.txt', 'not Markdown');
-    api.contents.set('CON.md', 'legacy marker note');
+  it('scans supported extensions in deterministic path order under an optional root', async () => {
+    for (const path of [
+      'History/2026-08.md',
+      'History/2026-08.csv',
+      'History/2026-08.json',
+      'History/export.txt',
+      'Archive/2026-08.md',
+    ]) {
+      api.files.set(path, new TFile(path));
+      api.contents.set(path, path);
+    }
 
-    const markdown: string[] = [];
-    await vault.scanMarkdownFiles((content) => markdown.push(content));
-    expect(markdown).toEqual([
-      'legacy marker note',
-      'one',
-      'two',
+    const seen: string[] = [];
+    await vault.scanFiles(['.md', '.csv', '.json'], ({ path }) => seen.push(path), 'History');
+
+    expect(seen).toEqual([
+      'History/2026-08.csv',
+      'History/2026-08.json',
+      'History/2026-08.md',
     ]);
   });
 
-  it('can restrict a Markdown scan to one safe vault folder', async () => {
-    api.files.set('History/one.md', new TFile('History/one.md'));
-    api.files.set('History/Nested/two.md', new TFile('History/Nested/two.md'));
-    api.files.set('Archive/three.md', new TFile('Archive/three.md'));
-    api.contents.set('History/one.md', 'one');
-    api.contents.set('History/Nested/two.md', 'two');
-    api.contents.set('Archive/three.md', 'three');
-    const markdown: string[] = [];
+  it('scans trusted unsafe legacy file names without applying path validation', async () => {
+    api.files.set('CON.md', new TFile('CON.md'));
+    api.contents.set('CON.md', 'legacy marker note');
+    const seen: string[] = [];
 
-    await vault.scanMarkdownFiles((content) => markdown.push(content), 'History');
+    await vault.scanFiles(['.md'], ({ content }) => seen.push(content));
 
-    expect(markdown).toEqual(['two', 'one']);
+    expect(seen).toEqual(['legacy marker note']);
+  });
+
+  it('writes existing files and trashes through the recoverable vault API', async () => {
+    api.files.set('History/2026-08.json', new TFile('History/2026-08.json'));
+    api.files.set('History/old.md', new TFile('History/old.md'));
+    api.contents.set('History/2026-08.json', '{"ok":false}\n');
+    api.contents.set('History/old.md', 'old');
+
+    await vault.write('History/2026-08.json', '{"ok":true}\n');
+    await vault.write('History/new.csv', 'new');
+    await vault.trash('History/old.md');
+
+    expect(api.modify).toHaveBeenCalled();
+    expect(api.trash).toHaveBeenCalledWith(expect.any(TFile), true);
+    expect(api.contents.get('History/2026-08.json')).toBe('{"ok":true}\n');
+    expect(api.createdFiles).toContainEqual({ path: 'History/new.csv', content: 'new' });
   });
 
   it('rechecks after a concurrent folder creator wins the race', async () => {
@@ -204,7 +224,9 @@ describe('ObsidianVaultPort', () => {
     await expect(vault.exists(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.ensureFolder(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.create(path, '')).rejects.toThrow('Unsafe vault path');
+    await expect(vault.write(path, '')).rejects.toThrow('Unsafe vault path');
     await expect(vault.append(path, '')).rejects.toThrow('Unsafe vault path');
+    await expect(vault.trash(path)).rejects.toThrow('Unsafe vault path');
     await expect(vault.read(path)).rejects.toThrow('Unsafe vault path');
   });
 
@@ -219,6 +241,8 @@ describe('ObsidianVaultPort', () => {
     await expect(vault.read('Browser History/missing.md'))
       .rejects.toThrow('Vault file not found');
     await expect(vault.append('Browser History/missing.md', 'entry'))
+      .rejects.toThrow('Vault file not found');
+    await expect(vault.trash('Browser History/missing.md'))
       .rejects.toThrow('Vault file not found');
   });
 });

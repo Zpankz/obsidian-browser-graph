@@ -1,5 +1,5 @@
 import { TFile, TFolder, type Vault } from 'obsidian';
-import type { VaultPort } from './domain';
+import type { VaultFileSnapshot, VaultPort } from './domain';
 import { normalizeSafeVaultPath } from './vault-path';
 
 export class ObsidianVaultPort implements VaultPort {
@@ -23,8 +23,25 @@ export class ObsidianVaultPort implements VaultPort {
     await this.vault.create(this.safeVaultPath(path), content);
   }
 
+  async write(path: string, content: string): Promise<void> {
+    const normalized = this.safeVaultPath(path);
+    const existing = this.vault.getAbstractFileByPath(normalized);
+    if (existing === null) {
+      await this.vault.create(normalized, content);
+      return;
+    }
+    if (!(existing instanceof TFile)) {
+      throw new Error(`Vault path is not a file: ${normalized}`);
+    }
+    await this.vault.modify(existing, content);
+  }
+
   async append(path: string, content: string): Promise<void> {
     await this.vault.append(this.fileAt(path), content);
+  }
+
+  async trash(path: string): Promise<void> {
+    await this.vault.trash(this.fileAt(path), true);
   }
 
   async ensureFolder(path: string): Promise<void> {
@@ -50,17 +67,21 @@ export class ObsidianVaultPort implements VaultPort {
     }
   }
 
-  async scanMarkdownFiles(
-    visit: (markdown: string) => void,
+  async scanFiles(
+    extensions: readonly string[],
+    visit: (file: VaultFileSnapshot) => void | Promise<void>,
     root?: string,
   ): Promise<void> {
     const normalizedRoot = root === undefined ? undefined : this.safeVaultPath(root);
-    const files = this.vault.getMarkdownFiles()
+    const supportedExtensions = extensions.map((extension) => extension.toLowerCase());
+    const files = this.vault.getFiles()
+      .filter((file) => supportedExtensions
+        .some((extension) => file.path.toLowerCase().endsWith(extension)))
       .filter((file) => normalizedRoot === undefined
         || file.path.startsWith(`${normalizedRoot}/`))
-      .sort((left, right) => left.path.localeCompare(right.path));
+      .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
     for (const file of files) {
-      visit(await this.vault.read(file));
+      await visit({ path: file.path, content: await this.vault.read(file) });
     }
   }
 

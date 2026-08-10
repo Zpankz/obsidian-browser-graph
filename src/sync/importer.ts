@@ -267,7 +267,7 @@ async function readManagedMarkerIndex(
   root?: string,
 ): Promise<Set<string>> {
   const importedIds = new Set<string>();
-  await vault.scanMarkdownFiles((content) => {
+  await vault.scanFiles(['.md'], ({ content }) => {
     for (const id of extractImportedIds(content)) {
       importedIds.add(id);
     }
