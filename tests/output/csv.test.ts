@@ -30,6 +30,30 @@ it.each(['=1+1', '+cmd', '-2+3', '@SUM(A1)', '\tformula', '\rformula', '\nformul
   },
 );
 
+it('distinguishes an absent original title from a present empty original title', () => {
+  const absentOriginalTitle = historyRecord({ title: '' });
+  const presentEmptyOriginalTitle = historyRecord({
+    title: '',
+    original_title: '',
+  });
+  const document = historyDocument({
+    records: [absentOriginalTitle, presentEmptyOriginalTitle],
+  });
+
+  expect(parseCsvDocument(serializeCsvDocument(document)).document).toEqual(document);
+});
+
+it.each(["'literal", '=1+1', '+cmd', '-2+3', '@SUM(A1)', '\tformula', '\rformula', '\nformula'])(
+  'round-trips an original title beginning with %j',
+  (original_title) => {
+    const document = historyDocument({
+      records: [historyRecord({ original_title })],
+    });
+
+    expect(parseCsvDocument(serializeCsvDocument(document)).document).toEqual(document);
+  },
+);
+
 it('requires parse context to reconstruct a header-only document', () => {
   const content = `${CSV_HEADER.join(',')}\r\n`;
   expect(() => parseCsvDocument(content)).toThrow('period');

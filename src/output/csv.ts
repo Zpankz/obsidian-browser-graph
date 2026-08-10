@@ -57,7 +57,7 @@ function rowFor(document: BrowserHistoryDocument, record: BrowserHistoryRecord):
     encodeCsvText(record.browser),
     encodeCsvText(record.profile),
     encodeCsvText(record.representation),
-    record.original_title === undefined ? '' : encodeCsvText(record.original_title),
+    record.original_title === undefined ? '' : `'${encodeCsvText(record.original_title)}`,
     record.sync === undefined ? '' : encodeCsvText(record.sync.namespace),
     record.sync === undefined ? '' : encodeCsvText(record.sync.browser),
     record.sync === undefined ? '' : encodeCsvText(record.sync.id),
@@ -131,7 +131,10 @@ function recordFor(row: string[]): BrowserHistoryRecord {
     representation: decodeCsvText(row[11]) as BrowserHistoryRecord['representation'],
   };
   if (row[12] !== '') {
-    record.original_title = decodeCsvText(row[12]);
+    if (!row[12].startsWith("'")) {
+      throw new Error('CSV original_title is missing its presence marker');
+    }
+    record.original_title = decodeCsvText(row[12].slice(1));
   }
   if (hasSync) {
     record.sync = {
