@@ -70,13 +70,17 @@ function vaultSegments(folder: string): string[] {
 export function destinationPath(
   settings: Pick<
     PluginSettings,
-    'outputFolder' | 'fileNameTemplate' | 'layout' | 'period'
+    'outputFolder' | 'fileNameTemplate' | 'layout' | 'period' | 'outputFormat'
   >,
   date: Date,
 ): string {
   const descriptor = periodFor(date, settings.period);
   const segments = vaultSegments(settings.outputFolder);
-  const fileName = formatOutputFileName(settings.fileNameTemplate, descriptor.key);
+  const fileName = formatOutputFileName(
+    settings.fileNameTemplate,
+    descriptor.key,
+    settings.outputFormat,
+  );
 
   if (settings.layout === 'flat') {
     return [...segments, fileName].join('/');

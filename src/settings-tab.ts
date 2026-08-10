@@ -9,11 +9,13 @@ import {
 import type {
   BrowserId,
   BrowserProfile,
+  FormatConversionBehavior,
   NotePeriod,
   OutputLayout,
   PluginSettings,
 } from './domain';
 import { BROWSER_CATALOG, type DiscoveryPlatform } from './platform/catalog';
+import type { OutputFormat } from './output/codec';
 import { isSafeFileNameTemplate } from './output/file-name';
 import { isSafeVaultFolder } from './settings';
 
@@ -25,6 +27,8 @@ export interface DetectedProfileStatus {
 export type PluginSettingField =
   | 'outputFolder'
   | 'fileNameTemplate'
+  | 'outputFormat'
+  | 'formatConversionBehavior'
   | 'layout'
   | 'period'
   | `enabledBrowsers.${BrowserId}`;
@@ -52,6 +56,8 @@ const browserDescriptions: Record<BrowserId, string> = {
 const saveError = 'Could not save this setting. Check that the vault is writable, then try again.';
 const outputLayouts: readonly OutputLayout[] = ['flat', 'tiered'];
 const notePeriods: readonly NotePeriod[] = ['day', 'week', 'month', 'year'];
+const outputFormats: readonly OutputFormat[] = ['markdown', 'csv', 'json'];
+const formatConversionBehaviors: readonly FormatConversionBehavior[] = ['keep', 'replace'];
 
 export class BrowserSyncSettingTab extends PluginSettingTab {
   private statusRenderSequence = 0;
@@ -99,7 +105,7 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
       },
       {
         name: 'File name template',
-        desc: 'Customize note filenames with {period}. The .md extension is added automatically.',
+        desc: "Customize note filenames with {period}. The selected format's extension is added automatically.",
         control: {
           type: 'text',
           key: 'fileNameTemplate',
@@ -107,6 +113,24 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
           validate: (value) => isSafeFileNameTemplate(value)
             ? undefined
             : 'Enter one portable filename containing {period}, without folders or other {placeholders}.',
+        },
+      },
+      {
+        name: 'Export format',
+        desc: 'Choose the file format for future browser history imports.',
+        control: {
+          type: 'dropdown',
+          key: 'outputFormat',
+          options: { markdown: 'Markdown', csv: 'CSV', json: 'JSON' },
+        },
+      },
+      {
+        name: 'Format conversion behavior',
+        desc: 'Choose whether the conversion command keeps or replaces original files.',
+        control: {
+          type: 'dropdown',
+          key: 'formatConversionBehavior',
+          options: { keep: 'Keep original files', replace: 'Replace original files' },
         },
       },
       {
@@ -148,6 +172,8 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
     if (
       key === 'outputFolder'
       || key === 'fileNameTemplate'
+      || key === 'outputFormat'
+      || key === 'formatConversionBehavior'
       || key === 'layout'
       || key === 'period'
     ) {
@@ -172,6 +198,15 @@ export class BrowserSyncSettingTab extends PluginSettingTab {
       field = key;
     } else if (key === 'fileNameTemplate' && isSafeFileNameTemplate(value)) {
       updated = { ...settings, fileNameTemplate: value };
+      field = key;
+    } else if (key === 'outputFormat' && isPermittedValue(value, outputFormats)) {
+      updated = { ...settings, outputFormat: value };
+      field = key;
+    } else if (
+      key === 'formatConversionBehavior'
+      && isPermittedValue(value, formatConversionBehaviors)
+    ) {
+      updated = { ...settings, formatConversionBehavior: value };
       field = key;
     } else if (key === 'layout' && isPermittedValue(value, outputLayouts)) {
       updated = { ...settings, layout: value };

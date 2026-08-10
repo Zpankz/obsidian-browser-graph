@@ -1,11 +1,13 @@
 import type {
   BrowserId,
+  FormatConversionBehavior,
   NotePeriod,
   OutputLayout,
   PersistedData,
   PluginSettings,
   ProfileCursor,
 } from './domain';
+import type { OutputFormat } from './output/codec';
 import {
   hashDeviceIdentityToken,
   resolveDeviceIdentity,
@@ -31,6 +33,8 @@ const browserIds: readonly BrowserId[] = [
 
 const notePeriods: readonly NotePeriod[] = ['day', 'week', 'month', 'year'];
 const outputLayouts: readonly OutputLayout[] = ['flat', 'tiered'];
+const outputFormats: readonly OutputFormat[] = ['markdown', 'csv', 'json'];
+const formatConversionBehaviors: readonly FormatConversionBehavior[] = ['keep', 'replace'];
 const DEVICE_IDENTITY_HASH = /^[a-f0-9]{64}$/;
 const MAX_SQLITE_VISIT_ID = '9223372036854775807';
 
@@ -48,6 +52,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   fileNameTemplate: DEFAULT_FILE_NAME_TEMPLATE,
   layout: 'tiered',
   period: 'month',
+  outputFormat: 'markdown',
+  formatConversionBehavior: 'keep',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -106,6 +112,12 @@ function migrateSettings(value: unknown, configDir?: string): PluginSettings {
     fileNameTemplate,
     layout: settingValue(value.layout, outputLayouts, DEFAULT_SETTINGS.layout),
     period: settingValue(value.period, notePeriods, DEFAULT_SETTINGS.period),
+    outputFormat: settingValue(value.outputFormat, outputFormats, DEFAULT_SETTINGS.outputFormat),
+    formatConversionBehavior: settingValue(
+      value.formatConversionBehavior,
+      formatConversionBehaviors,
+      DEFAULT_SETTINGS.formatConversionBehavior,
+    ),
   };
 }
 

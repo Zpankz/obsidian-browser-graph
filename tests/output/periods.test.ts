@@ -11,6 +11,7 @@ it('uses the approved default monthly tier', () => {
         fileNameTemplate: '{period}',
         layout: 'tiered',
         period: 'month',
+        outputFormat: 'markdown',
       },
       local('2026-08-03'),
     ),
@@ -26,6 +27,7 @@ it('files a crossing ISO week by its Monday', () => {
         fileNameTemplate: '{period}',
         layout: 'tiered',
         period: 'day',
+        outputFormat: 'markdown',
       },
       local('2026-01-01'),
     ),
@@ -40,6 +42,7 @@ it('places all period filenames directly in flat mode', () => {
         fileNameTemplate: '{period}',
         layout: 'flat',
         period: 'week',
+        outputFormat: 'markdown',
       },
       local('2026-08-03'),
     ),
@@ -54,6 +57,7 @@ it('uses the ISO Monday year and month as the tier for weekly notes', () => {
         fileNameTemplate: '{period}',
         layout: 'tiered',
         period: 'week',
+        outputFormat: 'markdown',
       },
       local('2026-01-01'),
     ),
@@ -68,6 +72,7 @@ it('uses a POSIX vault path when the configured folder uses backslashes', () => 
         fileNameTemplate: '{period}',
         layout: 'tiered',
         period: 'year',
+        outputFormat: 'markdown',
       },
       local('2026-08-03'),
     ),
@@ -82,8 +87,19 @@ it('applies fixed text around the period key in customized filenames', () => {
         fileNameTemplate: 'Browser history - {period}',
         layout: 'tiered',
         period: 'month',
+        outputFormat: 'markdown',
       },
       local('2026-08-03'),
     ),
   ).toBe('History/2026/Browser history - 2026-08.md');
+});
+
+it('uses the selected format extension in destination paths', () => {
+  expect(destinationPath({
+    outputFolder: 'Browser History',
+    fileNameTemplate: '{period}',
+    layout: 'tiered',
+    period: 'month',
+    outputFormat: 'json',
+  }, local('2026-08-03'))).toBe('Browser History/2026/2026-08.json');
 });

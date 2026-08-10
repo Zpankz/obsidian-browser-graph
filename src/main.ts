@@ -359,6 +359,8 @@ function validSettings(settings: PluginSettings, configDir: string): boolean {
     && isSafeFileNameTemplate(settings.fileNameTemplate)
     && (settings.layout === 'flat' || settings.layout === 'tiered')
     && ['day', 'week', 'month', 'year'].includes(settings.period)
+    && ['markdown', 'csv', 'json'].includes(settings.outputFormat)
+    && ['keep', 'replace'].includes(settings.formatConversionBehavior)
     && BROWSER_CATALOG.every(
       ({ browserId }) => typeof settings.enabledBrowsers[browserId] === 'boolean',
     );
@@ -391,6 +393,8 @@ interface SettingsPatch {
   fileNameTemplate?: string;
   layout?: PluginSettings['layout'];
   period?: PluginSettings['period'];
+  outputFormat?: PluginSettings['outputFormat'];
+  formatConversionBehavior?: PluginSettings['formatConversionBehavior'];
 }
 
 function settingsPatch(
@@ -407,6 +411,10 @@ function settingsPatch(
       patch.layout = requested.layout;
     } else if (field === 'period') {
       patch.period = requested.period;
+    } else if (field === 'outputFormat') {
+      patch.outputFormat = requested.outputFormat;
+    } else if (field === 'formatConversionBehavior') {
+      patch.formatConversionBehavior = requested.formatConversionBehavior;
     } else {
       const browserId = field.slice('enabledBrowsers.'.length) as BrowserId;
       patch.enabledBrowsers[browserId] = requested.enabledBrowsers[browserId];
@@ -428,6 +436,9 @@ function applySettingsPatch(
     fileNameTemplate: patch.fileNameTemplate ?? current.fileNameTemplate,
     layout: patch.layout ?? current.layout,
     period: patch.period ?? current.period,
+    outputFormat: patch.outputFormat ?? current.outputFormat,
+    formatConversionBehavior: patch.formatConversionBehavior
+      ?? current.formatConversionBehavior,
   };
 }
 

@@ -1,3 +1,5 @@
+import type { OutputFormat } from './output/codec';
+
 export type BrowserId =
   | 'safari'
   | 'firefox'
@@ -9,6 +11,7 @@ export type BrowserId =
 
 export type NotePeriod = 'day' | 'week' | 'month' | 'year';
 export type OutputLayout = 'flat' | 'tiered';
+export type FormatConversionBehavior = 'keep' | 'replace';
 
 export interface PluginSettings {
   enabledBrowsers: Record<BrowserId, boolean>;
@@ -16,6 +19,8 @@ export interface PluginSettings {
   fileNameTemplate: string;
   layout: OutputLayout;
   period: NotePeriod;
+  outputFormat: OutputFormat;
+  formatConversionBehavior: FormatConversionBehavior;
 }
 
 export interface ProfileCursor {

@@ -1,4 +1,5 @@
 import { normalizeSafeVaultPath } from '../vault-path';
+import { codecFor, type OutputFormat } from './codec';
 
 export const DEFAULT_FILE_NAME_TEMPLATE = '{period}';
 const PERIOD_TOKEN = '{period}';
@@ -21,10 +22,14 @@ export function isSafeFileNameTemplate(value: unknown): value is string {
     return false;
   }
 
-  const exampleFileName = formatOutputFileName(value, '2000-W01');
+  const exampleFileName = formatOutputFileName(value, '2000-W01', 'markdown');
   return normalizeSafeVaultPath(exampleFileName) === exampleFileName;
 }
 
-export function formatOutputFileName(template: string, periodKey: string): string {
-  return `${template.split(PERIOD_TOKEN).join(periodKey)}.md`;
+export function formatOutputFileName(
+  template: string,
+  periodKey: string,
+  format: OutputFormat,
+): string {
+  return `${template.split(PERIOD_TOKEN).join(periodKey)}${codecFor(format).extension}`;
 }

@@ -26,6 +26,8 @@ describe('migratePersistedData', () => {
     expect(DEFAULT_SETTINGS.fileNameTemplate).toBe('{period}');
     expect(DEFAULT_SETTINGS.layout).toBe('tiered');
     expect(DEFAULT_SETTINGS.period).toBe('month');
+    expect(DEFAULT_SETTINGS.outputFormat).toBe('markdown');
+    expect(DEFAULT_SETTINGS.formatConversionBehavior).toBe('keep');
   });
 
   it('sanitizes legacy and malformed persisted fields', () => {
@@ -62,6 +64,55 @@ describe('migratePersistedData', () => {
     });
     expect(migratePersistedData({ ...saved, version: 2 }, DEVICE_A, NOW).cursors)
       .toEqual({});
+  });
+
+  it('adds format defaults to existing version 3 state without resetting same-device cursors', () => {
+    const savedV3 = {
+      version: 3,
+      deviceIdentityHash: DEVICE_A,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enabledBrowsers: { ...DEFAULT_SETTINGS.enabledBrowsers },
+      },
+      cursors: {
+        'chrome:same-path': {
+          visitedAtMs: NOW,
+          sourceVisitId: '42',
+        },
+      },
+    };
+    delete (savedV3.settings as Partial<typeof DEFAULT_SETTINGS>).outputFormat;
+    delete (savedV3.settings as Partial<typeof DEFAULT_SETTINGS>).formatConversionBehavior;
+
+    expect(migratePersistedData(savedV3, DEVICE_A, NOW)).toMatchObject({
+      version: 3,
+      settings: {
+        outputFormat: 'markdown',
+        formatConversionBehavior: 'keep',
+      },
+      cursors: savedV3.cursors,
+    });
+  });
+
+  it('migrates only supported persisted format settings', () => {
+    expect(migratePersistedData({
+      settings: {
+        outputFormat: 'json',
+        formatConversionBehavior: 'replace',
+      },
+    }, DEVICE_A, NOW).settings).toMatchObject({
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    });
+    expect(migratePersistedData({
+      settings: {
+        outputFormat: 'pdf',
+        formatConversionBehavior: 'delete',
+      },
+    }, DEVICE_A, NOW).settings).toMatchObject({
+      outputFormat: 'markdown',
+      formatConversionBehavior: 'keep',
+    });
   });
 
   it('rejects persisted cursors with unsafe timestamps', () => {

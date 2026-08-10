@@ -823,6 +823,44 @@ describe('BrowserSyncPlugin', () => {
     consoleError.mockRestore();
   });
 
+  it('preserves committed format settings in cursor persistence snapshots', async () => {
+    const runImporter = vi.fn(async (
+      request: Parameters<BrowserSyncRuntime['runImporter']>[0],
+      dependencies: Parameters<BrowserSyncRuntime['runImporter']>[1],
+    ) => {
+      request.data.cursors['chrome:default'] = {
+        visitedAtMs: Date.parse('2026-08-03T12:00:00Z'),
+        sourceVisitId: '42',
+      };
+      await dependencies.saveData(request.data);
+      return emptySummary;
+    });
+    const plugin = new PluginHarness(undefined, runtime({ runImporter }));
+    await plugin.onload();
+
+    const formatSettings: PluginSettings = {
+      ...plugin.data.settings,
+      enabledBrowsers: { ...plugin.data.settings.enabledBrowsers },
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    };
+    await plugin.updateSettings(formatSettings, [
+      'outputFormat',
+      'formatConversionBehavior',
+    ]);
+    await plugin.importBrowserHistory();
+
+    expect(plugin.saved.at(-1)).toMatchObject({
+      settings: {
+        outputFormat: 'json',
+        formatConversionBehavior: 'replace',
+      },
+      cursors: {
+        'chrome:default': { sourceVisitId: '42' },
+      },
+    });
+  });
+
   it('summarizes every outcome without exposing visited URLs', async () => {
     const secretUrl = 'https://private.example/visited';
     const notice = vi.fn();
@@ -970,6 +1008,14 @@ describe('BrowserSyncSettingTab', () => {
     expect(setting('Safari').toggle?.disabled).toBe(true);
     expect(setting('Output folder').text?.value).toBe('Browser History');
     expect(setting('File name template').text?.value).toBe('{period}');
+    expect(setting('Export format').dropdown).toMatchObject({
+      value: 'markdown',
+      options: { markdown: 'Markdown', csv: 'CSV', json: 'JSON' },
+    });
+    expect(setting('Format conversion behavior').dropdown).toMatchObject({
+      value: 'keep',
+      options: { keep: 'Keep original files', replace: 'Replace original files' },
+    });
     expect(setting('Layout').dropdown?.options).toEqual({
       flat: 'Flat',
       tiered: 'Tiered',
@@ -1016,6 +1062,24 @@ describe('BrowserSyncSettingTab', () => {
     expect(template.error).toBeNull();
     expect(plugin.saved.at(-1)?.settings.fileNameTemplate)
       .toBe('Browser history - {period}');
+  });
+
+  it('saves selected export and conversion settings', async () => {
+    const plugin = new PluginHarness(undefined, runtime());
+    await plugin.onload();
+    plugin.settingTabs[0].display();
+
+    await setting('Export format').dropdown?.onChange?.('json');
+    await setting('Format conversion behavior').dropdown?.onChange?.('replace');
+
+    expect(plugin.data.settings).toMatchObject({
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    });
+    expect(plugin.saved.at(-1)?.settings).toMatchObject({
+      outputFormat: 'json',
+      formatConversionBehavior: 'replace',
+    });
   });
 
   it('does not erase a trailing separator while typing a nested output folder', async () => {
