@@ -35,3 +35,6 @@ Desktop.ini
 # Editor-local settings
 .idea/
 .vscode/
+
+# Bun (repo tracks package-lock.json; bun install used locally)
+bun.lock
